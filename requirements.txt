@@ -1,0 +1,15 @@
+# PyTorch/xFormers are installed separately by setup.ps1 from the CUDA 12.1 index.
+accelerate==0.25.0
+diffusers==0.24.0
+huggingface-hub==0.19.4
+nvidia-ml-py==12.535.133
+# PyTorch 2.1.0 wheels use the NumPy 1.x C ABI. NumPy 2.x disables
+# Tensor.numpy() and breaks Diffusers scheduler initialization.
+numpy==1.26.4
+omegaconf==2.3.0
+Pillow==10.1.0
+PyOpenGL==3.1.7
+safetensors==0.4.1
+SpoutGL==0.1.1
+streamdiffusion==0.1.1
+transformers==4.35.2
