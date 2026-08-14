@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
+from typing import Any
 
 from PIL import Image, ImageChops, ImageStat
 
@@ -106,10 +108,7 @@ class StreamDiffusionEngine:
         assert self.pipe is not None
         assert self._torch is not None
 
-        first_step = min(self.config.denoise_index, 48)
-        t_index_list = [first_step]
-        if self.config.lcm_steps == 2:
-            t_index_list.append(min(first_step + 13, 49))
+        t_index_list = self._t_index_list()
 
         self.stream = self._stream_class(
             self.pipe,
@@ -134,6 +133,19 @@ class StreamDiffusionEngine:
             self.log(f"LCM {mode}推論を有効にしました: t_index={t_index_list}")
         else:
             self.log(f"モデル内蔵の少ステップ推論を使用します: t_index={t_index_list}")
+        self._prepare_stream()
+        self._warmed_up = False
+        self.reset_temporal(log=False)
+
+    def _t_index_list(self) -> list[int]:
+        first_step = min(self.config.denoise_index, 48)
+        t_index_list = [first_step]
+        if self.config.lcm_steps == 2:
+            t_index_list.append(min(first_step + 13, 49))
+        return t_index_list
+
+    def _prepare_stream(self) -> None:
+        assert self.stream is not None
         self.stream.prepare(
             prompt=self.config.prompt,
             negative_prompt="",
@@ -141,8 +153,6 @@ class StreamDiffusionEngine:
             guidance_scale=1.0,
             seed=self.config.seed,
         )
-        self._warmed_up = False
-        self.reset_temporal(log=False)
 
     def update_prompt(self, prompt: str) -> None:
         prompt = prompt.strip()
@@ -152,6 +162,72 @@ class StreamDiffusionEngine:
         self.config.prompt = prompt
         self.reset_temporal(log=False)
         self.log("プロンプトを更新し、時間履歴をリセットしました。")
+
+    def update_live_settings(self, settings: dict[str, Any]) -> None:
+        """Apply values that do not require model, VAE, Spout, or resolution reloads."""
+        allowed = {
+            "denoise_index",
+            "seed",
+            "target_fps",
+            "temporal_feedback",
+            "temporal_smoothing",
+            "scene_cut_threshold",
+        }
+        unknown = set(settings) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"実行中に変更できない設定です: {names}")
+
+        normalized: dict[str, int | float] = {}
+        if "denoise_index" in settings:
+            normalized["denoise_index"] = int(round(float(settings["denoise_index"])))
+        if "seed" in settings:
+            normalized["seed"] = int(settings["seed"])
+        for name in (
+            "target_fps",
+            "temporal_feedback",
+            "temporal_smoothing",
+            "scene_cut_threshold",
+        ):
+            if name in settings:
+                normalized[name] = float(settings[name])
+
+        candidate = replace(self.config, **normalized)
+        candidate.validate()
+        requires_prepare = any(
+            getattr(candidate, name) != getattr(self.config, name)
+            for name in ("denoise_index", "seed")
+        )
+        changed = [
+            name
+            for name, value in normalized.items()
+            if value != getattr(self.config, name)
+        ]
+        if not changed:
+            return
+
+        for name in changed:
+            setattr(self.config, name, getattr(candidate, name))
+
+        if requires_prepare:
+            if self.stream is None:
+                return
+            # The step count and tensor shapes stay unchanged, so replacing the
+            # timestep list and preparing the cached stream is much cheaper than
+            # reloading the model. Commands run between frames on the worker thread.
+            self.stream.t_list = self._t_index_list()
+            self._prepare_stream()
+            self.reset_temporal(log=False)
+
+        labels = {
+            "denoise_index": "変換強度",
+            "seed": "Seed",
+            "target_fps": "FPS上限",
+            "temporal_feedback": "入力保持",
+            "temporal_smoothing": "出力平滑化",
+            "scene_cut_threshold": "シーン変化",
+        }
+        self.log("即時設定を更新しました: " + ", ".join(labels[name] for name in changed))
 
     def reset_temporal(self, log: bool = True) -> None:
         self._previous_input = None

@@ -70,6 +70,11 @@ MODEL_PRESETS = {
         "directory": "dreamshaper-8",
         "patterns": QUALITY_MODEL_FILES,
     },
+    "absolute-reality-1.81": {
+        "repo_id": "Lykon/absolute-reality-1.81",
+        "directory": "absolute-reality-1.81",
+        "patterns": QUALITY_MODEL_FILES,
+    },
     "lcm-dreamshaper-v7": {
         "repo_id": "SimianLuo/LCM_Dreamshaper_v7",
         "directory": "lcm-dreamshaper-v7",
@@ -78,6 +83,11 @@ MODEL_PRESETS = {
     "realistic-vision-v5.1": {
         "repo_id": "SG161222/Realistic_Vision_V5.1_noVAE",
         "directory": "realistic-vision-v5.1",
+        "patterns": FULL_PRECISION_MODEL_FILES,
+    },
+    "epicrealism": {
+        "repo_id": "emilianJR/epiCRealism",
+        "directory": "epicrealism",
         "patterns": FULL_PRECISION_MODEL_FILES,
     },
     "sd-turbo": {

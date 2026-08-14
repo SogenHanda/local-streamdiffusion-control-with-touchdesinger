@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from ergonomics_diffusion.runtime import LatestFrameReceiver
+from ergonomics_diffusion.runtime import DiffusionWorker, LatestFrameReceiver, WorkerEvent
 from ergonomics_diffusion.spout_transport import ReceivedFrame
 
 
@@ -54,5 +55,37 @@ class LatestFrameReceiverTests(unittest.TestCase):
         self.assertEqual(frame.image.getpixel((0, 0)), (3, 0, 0))
         self.assertEqual(snapshot.frames, 3)
         self.assertEqual(snapshot.resolution, "16 × 16")
+
+
+class FakeEngine:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.settings: list[dict[str, object]] = []
+        self.reset_count = 0
+
+    def update_prompt(self, prompt: str) -> None:
+        self.prompts.append(prompt)
+
+    def update_live_settings(self, settings: dict[str, object]) -> None:
+        self.settings.append(settings)
+
+    def reset_temporal(self) -> None:
+        self.reset_count += 1
+
+
+class WorkerCommandTests(unittest.TestCase):
+    def test_live_updates_are_coalesced_to_latest_values(self) -> None:
+        events: "queue.Queue[WorkerEvent]" = queue.Queue()
+        worker = DiffusionWorker(events)
+        engine = FakeEngine()
+        worker.update_live_settings({"target_fps": 15, "temporal_feedback": 0.2})
+        worker.update_live_settings({"target_fps": 30})
+
+        worker._drain_commands(engine)  # type: ignore[arg-type]
+
+        self.assertEqual(
+            engine.settings,
+            [{"target_fps": 30, "temporal_feedback": 0.2}],
+        )
 if __name__ == "__main__":
     unittest.main()

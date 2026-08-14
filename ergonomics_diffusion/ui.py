@@ -45,6 +45,7 @@ class DiffusionApp(tk.Tk):
         self._preview_refs: dict[str, ImageTk.PhotoImage] = {}
         self._closing = False
         self._state = "停止"
+        self._live_update_after_id: str | None = None
 
         try:
             config = AppConfig.load(config_path)
@@ -134,10 +135,12 @@ class DiffusionApp(tk.Tk):
         self.offline_var = tk.BooleanVar(value=config.offline_mode)
         self.status_var = tk.StringVar(value="停止")
         self.status_detail_var = tk.StringVar(value="設定を確認して開始してください。")
-        self.denoise_var.trace_add("write", lambda *_: self._update_denoise_label())
-        self.temporal_feedback_var.trace_add("write", lambda *_: self._update_temporal_labels())
-        self.temporal_smoothing_var.trace_add("write", lambda *_: self._update_temporal_labels())
-        self.scene_cut_threshold_var.trace_add("write", lambda *_: self._update_temporal_labels())
+        self.denoise_var.trace_add("write", self._on_denoise_changed)
+        self.seed_var.trace_add("write", self._on_live_value_changed)
+        self.target_fps_var.trace_add("write", self._on_live_value_changed)
+        self.temporal_feedback_var.trace_add("write", self._on_temporal_changed)
+        self.temporal_smoothing_var.trace_add("write", self._on_temporal_changed)
+        self.scene_cut_threshold_var.trace_add("write", self._on_temporal_changed)
         self._update_denoise_label()
         self._update_temporal_labels()
         self._initial_prompt = config.prompt
@@ -378,8 +381,13 @@ class DiffusionApp(tk.Tk):
 
         ttk.Label(
             parent,
-            text="※ プロンプト以外の変更は停止後に反映されます。",
+            text=(
+                "※ 即時反映: プロンプト、変換強度、Seed、FPS、入力保持、"
+                "出力平滑化、シーン変化リセット\n"
+                "※ 再開が必要: モデル、Spout名、解像度、ステップ、LCM/TinyVAE、反転"
+            ),
             style="Muted.Panel.TLabel",
+            wraplength=335,
         ).grid(row=row, column=0, sticky="w", pady=(8, 0))
         row += 1
 
@@ -619,6 +627,54 @@ class DiffusionApp(tk.Tk):
             return
         self.worker.update_prompt(prompt)
 
+    def _on_denoise_changed(self, *_args: object) -> None:
+        self._update_denoise_label()
+        self._schedule_live_settings_update()
+
+    def _on_temporal_changed(self, *_args: object) -> None:
+        self._update_temporal_labels()
+        self._schedule_live_settings_update()
+
+    def _on_live_value_changed(self, *_args: object) -> None:
+        self._schedule_live_settings_update()
+
+    def _schedule_live_settings_update(self) -> None:
+        if self._state not in {"起動中", "実行中"} or not self.worker.running:
+            return
+        if self._live_update_after_id is not None:
+            self.after_cancel(self._live_update_after_id)
+        # Coalesce slider movement and partially typed Spinbox values. This keeps
+        # temporal controls responsive and avoids repeatedly preparing timesteps.
+        self._live_update_after_id = self.after(180, self._apply_live_settings)
+
+    def _apply_live_settings(self) -> None:
+        self._live_update_after_id = None
+        if not self.worker.running:
+            return
+        try:
+            settings = {
+                "denoise_index": int(round(self.denoise_var.get())),
+                "seed": int(self.seed_var.get()),
+                "target_fps": float(self.target_fps_var.get()),
+                "temporal_feedback": float(self.temporal_feedback_var.get()),
+                "temporal_smoothing": float(self.temporal_smoothing_var.get()),
+                "scene_cut_threshold": float(self.scene_cut_threshold_var.get()),
+            }
+            if not 0 <= settings["denoise_index"] <= 49:
+                raise ValueError("変換強度が範囲外です。")
+            if not 0.1 <= settings["target_fps"] <= 240:
+                raise ValueError("FPS上限が範囲外です。")
+            if not 0.0 <= settings["temporal_feedback"] <= 0.8:
+                raise ValueError("入力フレーム保持が範囲外です。")
+            if not 0.0 <= settings["temporal_smoothing"] <= 0.8:
+                raise ValueError("出力平滑化が範囲外です。")
+            if not 0.05 <= settings["scene_cut_threshold"] <= 1.0:
+                raise ValueError("シーン変化リセットが範囲外です。")
+        except (tk.TclError, TypeError, ValueError):
+            # Spinbox text may be temporarily empty while the user is editing it.
+            return
+        self.worker.update_live_settings(settings)
+
     def _reset_temporal(self) -> None:
         if self.worker.running:
             self.worker.reset_temporal()
@@ -701,14 +757,22 @@ class DiffusionApp(tk.Tk):
         self.reset_temporal_button.configure(state="normal" if state == "実行中" else "disabled")
 
     def _update_denoise_label(self) -> None:
-        value = int(round(self.denoise_var.get()))
+        try:
+            value = int(round(self.denoise_var.get()))
+        except tk.TclError:
+            return
         strength = round((49 - value) / 49 * 100)
-        self.denoise_label_var.set(f"変換の強さ  {strength}%  （入力保持 {100 - strength}%）")
+        self.denoise_label_var.set(
+            f"変換の強さ  {strength}%  （入力保持 {100 - strength}%・実行中も反映）"
+        )
 
     def _update_temporal_labels(self) -> None:
-        feedback = round(float(self.temporal_feedback_var.get()) * 100)
-        smoothing = round(float(self.temporal_smoothing_var.get()) * 100)
-        scene_cut = round(float(self.scene_cut_threshold_var.get()) * 100)
+        try:
+            feedback = round(float(self.temporal_feedback_var.get()) * 100)
+            smoothing = round(float(self.temporal_smoothing_var.get()) * 100)
+            scene_cut = round(float(self.scene_cut_threshold_var.get()) * 100)
+        except tk.TclError:
+            return
         self.temporal_feedback_label_var.set(f"入力フレーム保持  {feedback}%")
         self.temporal_smoothing_label_var.set(f"出力平滑化  {smoothing}%")
         self.scene_cut_label_var.set(f"シーン変化リセット  {scene_cut}%")
@@ -725,6 +789,9 @@ class DiffusionApp(tk.Tk):
 
     def _on_close(self) -> None:
         self._closing = True
+        if self._live_update_after_id is not None:
+            self.after_cancel(self._live_update_after_id)
+            self._live_update_after_id = None
         self.worker.stop()
         self.destroy()
 

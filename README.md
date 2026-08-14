@@ -55,6 +55,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 モデル利用条件は導入前に必ず確認してください。
 
 - [DreamShaper 8 model card](https://huggingface.co/Lykon/dreamshaper-8)
+- [Absolute Reality 1.81 model card](https://huggingface.co/Lykon/absolute-reality-1.81)
+- [epiCRealism model card](https://huggingface.co/emilianJR/epiCRealism)
 - [LCM-LoRA SD 1.5 model card](https://huggingface.co/latent-consistency/lcm-lora-sdv1-5)
 - [TAESD](https://huggingface.co/madebyollin/taesd)
 
@@ -100,17 +102,17 @@ UIで設定を確認して「生成を開始」を押してください。起動
 - **生成解像度**: 384〜1024を選択可能。リアルタイム用途は512または640を推奨
 - **推論ステップ**: 1 stepは速度優先、2 stepsは画質優先
 - **プロンプト**: 実行中も「プロンプトを即時更新」で変更可能
-- **変換の強さ**: 100%に近いほど入力から大きく変化。0%に近いほど入力を保持
-- **入力フレーム保持**: 直前のカメラ入力を現在入力へ混ぜる割合。生成画像は推論入力へ戻さないため非再帰
-- **出力平滑化**: 新しい生成結果と前回出力を混ぜる割合。標準は15%
-- **シーン変化リセット**: 入力の変化量がこの値を超えた場合、過去画像を使わず残像を防止
-- **Seed**: ノイズの初期値。初版では固定値として扱うため、0以上を推奨
-- **FPS上限**: 推論が十分速い場合の上限。実測FPSはGPUと設定で決まる
+- **変換の強さ**: 100%に近いほど入力から大きく変化。実行中はモデルを再読込せず、StreamDiffusionのtimestepだけを再prepareして反映
+- **入力フレーム保持**: 直前のカメラ入力を現在入力へ混ぜる割合。生成画像は推論入力へ戻さないため非再帰。実行中も即時反映
+- **出力平滑化**: 新しい生成結果と前回出力を混ぜる割合。標準は15%。実行中も即時反映
+- **シーン変化リセット**: 入力の変化量がこの値を超えた場合、過去画像を使わず残像を防止。実行中も即時反映
+- **Seed**: ノイズの初期値。実行中はモデルを再読込せず再prepareして反映
+- **FPS上限**: 推論が十分速い場合の上限。実測FPSはGPUと設定で決まる。実行中も即時反映
 - **TinyVAE**: VAEのエンコード/デコードを高速化。画質を優先する場合は無効化
 - **LCM-LoRA**: DreamShaperへローカルLCM-LoRAを適用。SD-Turboを使う場合は無効化
 - **オフライン固定**: ローカルにないモデルをネットから取得しない
 
-プロンプト以外の設定は、安全のため停止後の再開時に反映します。
+プロンプト、変換強度、Seed、FPS上限、入力フレーム保持、出力平滑化、シーン変化リセットは実行中に反映します。スライダー操作は180msでまとめて送るため、ドラッグ中にコマンドが過剰に溜まりません。モデル、Spout名、動作プリセット、解像度、推論ステップ、LCM-LoRA、TinyVAE、上下反転は停止後に再開して反映します。
 
 ## モデル比較
 
@@ -119,13 +121,17 @@ UIには次のモデルプロファイルがあります。
 | モデル | 特徴 | LCM-LoRA | 推奨プリセット |
 |---|---|---:|---|
 | DreamShaper 8 | 汎用・製品・コンセプト表現 | 使用 | Balanced |
-| LCM DreamShaper v7 | 少ステップ用に直接蒸留 | 不要 | Realtime |
+| Absolute Reality 1.81 | 人間の質感と作品表現のバランス | 使用 | Balanced |
 | Realistic Vision 5.1 | 写真・素材感・実在感 | 使用 | Balanced |
+| epiCRealism | 皮膚・布・素材の写真質感を優先 | 使用 | Quality |
+| LCM DreamShaper v7 | 少ステップ用に直接蒸留 | 不要 | Realtime |
 | SD-Turbo | 速度優先の比較基準 | 不要 | Realtime |
 
-現在導入されているモデルにはUIで`✓ 導入済み`と表示されます。追加候補はオンライン環境で個別に取得できます。
+現在導入されているモデルにはUIで`【導入済み】`と表示されます。追加候補はオンライン環境で個別に取得できます。
 
 ```powershell
+.\download_models.ps1 --preset absolute-reality-1.81
+.\download_models.ps1 --preset epicrealism
 .\download_models.ps1 --preset lcm-dreamshaper-v7
 .\download_models.ps1 --preset realistic-vision-v5.1
 ```
@@ -136,7 +142,7 @@ UIには次のモデルプロファイルがあります。
 .\.venv\Scripts\python.exe .\download_models.py --list-presets
 ```
 
-モデルの変更は画風や1-step時の破綻傾向を改善できますが、2-stepのUNet計算量そのものは減りません。まず`Balanced — 2-step + TinyVAE`を基準に比較し、FPS不足の場合は解像度を512から448/384へ下げます。2-stepを保ったまま大幅に高速化する次の段階はTensorRT化です。
+モデルの変更は画風や1-step時の破綻傾向を改善できますが、同じSD 1.5 UNetなので同一解像度・同一stepで速度差は小さめです。まず`Balanced — 2-step + TinyVAE`を基準に比較し、FPS不足の場合は`LCM DreamShaper v7`の1-step、次に512から448/384への解像度低下を試します。2-stepを保ったまま大幅に高速化する次の段階はTensorRT化です。SDXL系モデルは現行のSD 1.5用LCM-LoRAとTAESDに互換性がないため、このモデル一覧には含めていません。
 
 ## 監視情報
 

@@ -235,6 +235,10 @@ class DiffusionWorker:
     def update_prompt(self, prompt: str) -> None:
         self._commands.put(("prompt", prompt))
 
+    def update_live_settings(self, settings: dict[str, Any]) -> None:
+        """Queue settings that are safe to change without reloading the model."""
+        self._commands.put(("live_settings", dict(settings)))
+
     def reset_temporal(self) -> None:
         self._commands.put(("reset_temporal", None))
 
@@ -373,15 +377,29 @@ class DiffusionWorker:
             self._log("推論処理はエラーで終了しました。" if failed else "推論処理を停止しました。")
 
     def _drain_commands(self, engine: StreamDiffusionEngine) -> None:
+        prompt: str | None = None
+        live_settings: dict[str, Any] = {}
+        reset_temporal = False
         while True:
             try:
                 command, value = self._commands.get_nowait()
             except queue.Empty:
-                return
+                break
             if command == "prompt":
-                engine.update_prompt(str(value))
+                prompt = str(value)
+            elif command == "live_settings":
+                live_settings.update(dict(value))
             elif command == "reset_temporal":
-                engine.reset_temporal()
+                reset_temporal = True
+
+        # Apply only the latest value of each control. A slow 2-step frame can
+        # otherwise leave several slider updates queued and feel delayed.
+        if prompt is not None:
+            engine.update_prompt(prompt)
+        if live_settings:
+            engine.update_live_settings(live_settings)
+        if reset_temporal:
+            engine.reset_temporal()
 
     @staticmethod
     def _update_metrics(

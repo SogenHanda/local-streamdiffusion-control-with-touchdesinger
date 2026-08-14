@@ -16,8 +16,10 @@ class ModelCatalogTests(unittest.TestCase):
     def test_builtin_profiles_cover_fast_and_quality_models(self) -> None:
         keys = {profile.key for profile in BUILTIN_MODEL_PROFILES}
         self.assertIn("dreamshaper-8", keys)
+        self.assertIn("absolute-reality-1.81", keys)
         self.assertIn("lcm-dreamshaper-v7", keys)
         self.assertIn("realistic-vision-v5.1", keys)
+        self.assertIn("epicrealism", keys)
         self.assertIn("sd-turbo", keys)
 
     def test_discovers_additional_diffusers_directory(self) -> None:
