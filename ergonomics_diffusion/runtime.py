@@ -34,6 +34,7 @@ class RuntimeMetrics:
     gpu_temperature: float = 0.0
     motion_score: float = 0.0
     temporal_feedback: float = 0.0
+    latent_morph: float = 0.0
 
 
 @dataclass(slots=True)
@@ -323,6 +324,7 @@ class DiffusionWorker:
                     metrics.inference_ms = inference_ms
                     metrics.motion_score = engine.last_motion_score
                     metrics.temporal_feedback = engine.last_temporal_feedback
+                    metrics.latent_morph = engine.last_latent_morph
                     metrics.output_resolution = f"{output.width} × {output.height}"
 
                     if spout_output.send(output):

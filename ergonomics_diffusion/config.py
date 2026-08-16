@@ -29,6 +29,8 @@ class AppConfig:
     use_tiny_vae: bool = True
     temporal_feedback: float = 0.35
     temporal_smoothing: float = 0.15
+    latent_morph_strength: float = 0.35
+    latent_history_frames: int = 3
     scene_cut_threshold: float = 0.35
     flip_input: bool = False
     flip_output: bool = False
@@ -86,6 +88,10 @@ class AppConfig:
             raise ValueError("入力フレーム保持は0〜0.8の範囲で指定してください。")
         if not 0.0 <= self.temporal_smoothing <= 0.8:
             raise ValueError("出力平滑化は0〜0.8の範囲で指定してください。")
+        if not 0.0 <= self.latent_morph_strength <= 0.8:
+            raise ValueError("生成特徴モーフは0〜0.8の範囲で指定してください。")
+        if not 2 <= self.latent_history_frames <= 8:
+            raise ValueError("特徴履歴フレームは2〜8の範囲で指定してください。")
         if not 0.05 <= self.scene_cut_threshold <= 1.0:
             raise ValueError("シーン変化リセットは0.05〜1.0の範囲で指定してください。")
         if not self.prompt.strip():

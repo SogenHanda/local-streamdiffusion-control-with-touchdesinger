@@ -126,9 +126,13 @@ class DiffusionApp(tk.Tk):
         self.tiny_vae_var = tk.BooleanVar(value=config.use_tiny_vae)
         self.temporal_feedback_var = tk.DoubleVar(value=config.temporal_feedback)
         self.temporal_smoothing_var = tk.DoubleVar(value=config.temporal_smoothing)
+        self.latent_morph_strength_var = tk.DoubleVar(value=config.latent_morph_strength)
+        self.latent_history_frames_var = tk.DoubleVar(value=config.latent_history_frames)
         self.scene_cut_threshold_var = tk.DoubleVar(value=config.scene_cut_threshold)
         self.temporal_feedback_label_var = tk.StringVar()
         self.temporal_smoothing_label_var = tk.StringVar()
+        self.latent_morph_label_var = tk.StringVar()
+        self.latent_history_label_var = tk.StringVar()
         self.scene_cut_label_var = tk.StringVar()
         self.flip_input_var = tk.BooleanVar(value=config.flip_input)
         self.flip_output_var = tk.BooleanVar(value=config.flip_output)
@@ -140,6 +144,8 @@ class DiffusionApp(tk.Tk):
         self.target_fps_var.trace_add("write", self._on_live_value_changed)
         self.temporal_feedback_var.trace_add("write", self._on_temporal_changed)
         self.temporal_smoothing_var.trace_add("write", self._on_temporal_changed)
+        self.latent_morph_strength_var.trace_add("write", self._on_temporal_changed)
+        self.latent_history_frames_var.trace_add("write", self._on_temporal_changed)
         self.scene_cut_threshold_var.trace_add("write", self._on_temporal_changed)
         self._update_denoise_label()
         self._update_temporal_labels()
@@ -344,11 +350,34 @@ class DiffusionApp(tk.Tk):
         row = self._labeled_scale(
             parent,
             row,
+            self.latent_morph_label_var,
+            self.latent_morph_strength_var,
+            0.0,
+            0.65,
+        )
+        row = self._labeled_scale(
+            parent,
+            row,
+            self.latent_history_label_var,
+            self.latent_history_frames_var,
+            2,
+            8,
+        )
+        row = self._labeled_scale(
+            parent,
+            row,
             self.scene_cut_label_var,
             self.scene_cut_threshold_var,
             0.05,
             0.8,
         )
+
+        ttk.Button(
+            parent,
+            text="残像を抑えるモーフ推奨値",
+            command=self._apply_morph_preset,
+        ).grid(row=row, column=0, sticky="ew", pady=(7, 2))
+        row += 1
 
         numeric = ttk.Frame(parent, style="Panel.TFrame")
         numeric.grid(row=row, column=0, sticky="ew", pady=(8, 0))
@@ -383,7 +412,7 @@ class DiffusionApp(tk.Tk):
             parent,
             text=(
                 "※ 即時反映: プロンプト、変換強度、Seed、FPS、入力保持、"
-                "出力平滑化、シーン変化リセット\n"
+                "出力平滑化、生成特徴モーフ/履歴、シーン変化リセット\n"
                 "※ 再開が必要: モデル、Spout名、解像度、ステップ、LCM/TinyVAE、反転"
             ),
             style="Muted.Panel.TLabel",
@@ -427,6 +456,7 @@ class DiffusionApp(tk.Tk):
             ("output_resolution", "OUTPUT SIZE"),
             ("motion_score", "MOTION"),
             ("temporal_feedback", "INPUT HOLD"),
+            ("latent_morph", "LATENT MORPH"),
         )
         self.metric_vars: dict[str, tk.StringVar] = {}
         for index, (key, label) in enumerate(metric_specs):
@@ -475,7 +505,7 @@ class DiffusionApp(tk.Tk):
         parent: ttk.Frame,
         row: int,
         label_variable: tk.StringVar,
-        variable: tk.DoubleVar,
+        variable: tk.Variable,
         minimum: float,
         maximum: float,
     ) -> int:
@@ -595,6 +625,8 @@ class DiffusionApp(tk.Tk):
             use_tiny_vae=bool(self.tiny_vae_var.get()),
             temporal_feedback=float(self.temporal_feedback_var.get()),
             temporal_smoothing=float(self.temporal_smoothing_var.get()),
+            latent_morph_strength=float(self.latent_morph_strength_var.get()),
+            latent_history_frames=int(round(self.latent_history_frames_var.get())),
             scene_cut_threshold=float(self.scene_cut_threshold_var.get()),
             flip_input=bool(self.flip_input_var.get()),
             flip_output=bool(self.flip_output_var.get()),
@@ -638,6 +670,15 @@ class DiffusionApp(tk.Tk):
     def _on_live_value_changed(self, *_args: object) -> None:
         self._schedule_live_settings_update()
 
+    def _apply_morph_preset(self) -> None:
+        """Favor short latent history over RGB frame accumulation."""
+        self.temporal_feedback_var.set(0.0)
+        self.temporal_smoothing_var.set(0.03)
+        self.latent_morph_strength_var.set(0.38)
+        self.latent_history_frames_var.set(3)
+        self.scene_cut_threshold_var.set(0.35)
+        self._append_log("モーフ推奨値を設定しました（実行中も即時反映）。")
+
     def _schedule_live_settings_update(self) -> None:
         if self._state not in {"起動中", "実行中"} or not self.worker.running:
             return
@@ -658,6 +699,8 @@ class DiffusionApp(tk.Tk):
                 "target_fps": float(self.target_fps_var.get()),
                 "temporal_feedback": float(self.temporal_feedback_var.get()),
                 "temporal_smoothing": float(self.temporal_smoothing_var.get()),
+                "latent_morph_strength": float(self.latent_morph_strength_var.get()),
+                "latent_history_frames": int(round(self.latent_history_frames_var.get())),
                 "scene_cut_threshold": float(self.scene_cut_threshold_var.get()),
             }
             if not 0 <= settings["denoise_index"] <= 49:
@@ -668,6 +711,10 @@ class DiffusionApp(tk.Tk):
                 raise ValueError("入力フレーム保持が範囲外です。")
             if not 0.0 <= settings["temporal_smoothing"] <= 0.8:
                 raise ValueError("出力平滑化が範囲外です。")
+            if not 0.0 <= settings["latent_morph_strength"] <= 0.8:
+                raise ValueError("生成特徴モーフが範囲外です。")
+            if not 2 <= settings["latent_history_frames"] <= 8:
+                raise ValueError("特徴履歴フレームが範囲外です。")
             if not 0.05 <= settings["scene_cut_threshold"] <= 1.0:
                 raise ValueError("シーン変化リセットが範囲外です。")
         except (tk.TclError, TypeError, ValueError):
@@ -730,6 +777,9 @@ class DiffusionApp(tk.Tk):
         self.metric_vars["temporal_feedback"].set(
             f"{metrics.get('temporal_feedback', 0) * 100:.0f} %"
         )
+        self.metric_vars["latent_morph"].set(
+            f"{metrics.get('latent_morph', 0) * 100:.0f} %"
+        )
 
     def _set_preview(self, key: str, label: tk.Label, image: Image.Image) -> None:
         canvas = Image.new("RGB", (256, 256), "#090c10")
@@ -770,11 +820,15 @@ class DiffusionApp(tk.Tk):
         try:
             feedback = round(float(self.temporal_feedback_var.get()) * 100)
             smoothing = round(float(self.temporal_smoothing_var.get()) * 100)
+            latent_morph = round(float(self.latent_morph_strength_var.get()) * 100)
+            latent_frames = int(round(self.latent_history_frames_var.get()))
             scene_cut = round(float(self.scene_cut_threshold_var.get()) * 100)
         except tk.TclError:
             return
         self.temporal_feedback_label_var.set(f"入力フレーム保持  {feedback}%")
         self.temporal_smoothing_label_var.set(f"出力平滑化  {smoothing}%")
+        self.latent_morph_label_var.set(f"生成特徴モーフ  {latent_morph}%")
+        self.latent_history_label_var.set(f"特徴履歴  {latent_frames} フレーム")
         self.scene_cut_label_var.set(f"シーン変化リセット  {scene_cut}%")
 
     def _append_log(self, message: str) -> None:

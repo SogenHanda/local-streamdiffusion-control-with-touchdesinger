@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+import torch
 from PIL import Image
 
 from ergonomics_diffusion.config import AppConfig
@@ -64,6 +65,50 @@ class TemporalFeedbackTests(unittest.TestCase):
         smoothed = engine._smooth_output(current)
 
         self.assertEqual(smoothed.getpixel((0, 0)), (51, 51, 51))
+
+    def test_generated_latent_history_morphs_without_rgb_feedback(self) -> None:
+        engine = self.make_engine(
+            latent_morph_strength=0.5,
+            latent_history_frames=3,
+            scene_cut_threshold=1.0,
+        )
+        engine.last_motion_score = 0.0
+
+        first = engine._stabilize_generated_latent(torch.zeros((1, 1, 1, 1)))
+        second = engine._stabilize_generated_latent(torch.ones((1, 1, 1, 1)))
+        third = engine._stabilize_generated_latent(torch.ones((1, 1, 1, 1)))
+
+        self.assertAlmostEqual(first.item(), 0.0)
+        self.assertAlmostEqual(second.item(), 0.5)
+        # History stores raw 0 and 1 features. Recency-weighted reference is 2/3.
+        self.assertAlmostEqual(third.item(), 5 / 6, places=5)
+        self.assertAlmostEqual(engine.last_latent_morph, 0.5)
+
+    def test_latent_morph_is_motion_adaptive_and_history_is_bounded(self) -> None:
+        engine = self.make_engine(
+            latent_morph_strength=0.6,
+            latent_history_frames=2,
+            scene_cut_threshold=0.5,
+        )
+        engine._stabilize_generated_latent(torch.zeros((1, 1, 1, 1)))
+        engine.last_motion_score = 0.25
+        result = engine._stabilize_generated_latent(torch.ones((1, 1, 1, 1)))
+        engine._stabilize_generated_latent(torch.full((1, 1, 1, 1), 2.0))
+
+        self.assertAlmostEqual(engine.last_latent_morph, 0.45)
+        self.assertAlmostEqual(result.item(), 0.55)
+        self.assertEqual(len(engine._latent_history), 2)
+
+    def test_scene_change_discards_generated_latent_history(self) -> None:
+        engine = self.make_engine(latent_morph_strength=0.6, latent_history_frames=3)
+        engine._stabilize_generated_latent(torch.zeros((1, 1, 1, 1)))
+        engine._scene_cut_detected = True
+
+        result = engine._stabilize_generated_latent(torch.ones((1, 1, 1, 1)))
+
+        self.assertAlmostEqual(result.item(), 1.0)
+        self.assertAlmostEqual(engine.last_latent_morph, 0.0)
+        self.assertEqual(len(engine._latent_history), 1)
 
 if __name__ == "__main__":
     unittest.main()

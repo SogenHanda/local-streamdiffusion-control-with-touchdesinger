@@ -18,6 +18,8 @@ class AppConfigTests(unittest.TestCase):
                 lcm_steps=2,
                 temporal_feedback=0.42,
                 temporal_smoothing=0.18,
+                latent_morph_strength=0.4,
+                latent_history_frames=4,
             )
             expected.save(path)
             actual = AppConfig.load(path)
@@ -27,6 +29,8 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(actual.lcm_steps, expected.lcm_steps)
             self.assertEqual(actual.temporal_feedback, expected.temporal_feedback)
             self.assertEqual(actual.temporal_smoothing, expected.temporal_smoothing)
+            self.assertEqual(actual.latent_morph_strength, expected.latent_morph_strength)
+            self.assertEqual(actual.latent_history_frames, expected.latent_history_frames)
 
     def test_spout_names_must_be_different(self) -> None:
         config = AppConfig(spout_input="same", spout_output="same")
@@ -42,6 +46,12 @@ class AppConfigTests(unittest.TestCase):
         config = AppConfig(temporal_feedback=0.9)
         with self.assertRaises(ValueError):
             config.validate()
+
+    def test_latent_history_values_are_bounded(self) -> None:
+        with self.assertRaises(ValueError):
+            AppConfig(latent_morph_strength=0.9).validate()
+        with self.assertRaises(ValueError):
+            AppConfig(latent_history_frames=9).validate()
 
     def test_sd_turbo_cannot_use_sd15_lcm_lora(self) -> None:
         config = AppConfig(model_path="models/sd-turbo", use_lcm_lora=True)

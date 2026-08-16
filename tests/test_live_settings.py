@@ -32,6 +32,8 @@ class LiveSettingsTests(unittest.TestCase):
                 "target_fps": 24,
                 "temporal_feedback": 0.45,
                 "temporal_smoothing": 0.2,
+                "latent_morph_strength": 0.4,
+                "latent_history_frames": 5,
                 "scene_cut_threshold": 0.4,
             }
         )
@@ -39,6 +41,8 @@ class LiveSettingsTests(unittest.TestCase):
         self.assertEqual(engine.config.target_fps, 24)
         self.assertEqual(engine.config.temporal_feedback, 0.45)
         self.assertEqual(engine.config.temporal_smoothing, 0.2)
+        self.assertEqual(engine.config.latent_morph_strength, 0.4)
+        self.assertEqual(engine.config.latent_history_frames, 5)
         self.assertEqual(engine.config.scene_cut_threshold, 0.4)
         self.assertEqual(stream.prepare_calls, [])
 

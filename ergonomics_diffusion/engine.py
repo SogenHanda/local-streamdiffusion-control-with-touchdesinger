@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -26,9 +27,12 @@ class StreamDiffusionEngine:
         self._warmed_up = False
         self._previous_input: Image.Image | None = None
         self._previous_output: Image.Image | None = None
+        self._latent_history: deque[Any] = deque()
+        self._original_decode_image = None
         self._scene_cut_detected = False
         self.last_motion_score = 0.0
         self.last_temporal_feedback = 0.0
+        self.last_latent_morph = 0.0
 
     def load(self) -> None:
         model_path = self.config.resolved_model_path
@@ -121,6 +125,16 @@ class StreamDiffusionEngine:
             frame_buffer_size=1,
             cfg_type="none",
         )
+        # StreamDiffusion exposes the denoised latent immediately before VAE
+        # decoding. Stabilize at that point so history morphs generated features
+        # instead of overlaying RGB frames and producing trails/bright edges.
+        self._original_decode_image = self.stream.decode_image
+        self.stream.decode_image = self._decode_with_latent_history
+        self.log(
+            "生成latentモーフを有効化しました: "
+            f"{self.config.latent_morph_strength * 100:.0f}% / "
+            f"{self.config.latent_history_frames}フレーム"
+        )
         if self.config.use_lcm_lora:
             lcm_lora_path = self.config.resolved_lcm_lora_path
             lcm_lora_target = (
@@ -171,6 +185,8 @@ class StreamDiffusionEngine:
             "target_fps",
             "temporal_feedback",
             "temporal_smoothing",
+            "latent_morph_strength",
+            "latent_history_frames",
             "scene_cut_threshold",
         }
         unknown = set(settings) - allowed
@@ -187,10 +203,15 @@ class StreamDiffusionEngine:
             "target_fps",
             "temporal_feedback",
             "temporal_smoothing",
+            "latent_morph_strength",
             "scene_cut_threshold",
         ):
             if name in settings:
                 normalized[name] = float(settings[name])
+        if "latent_history_frames" in settings:
+            normalized["latent_history_frames"] = int(
+                round(float(settings["latent_history_frames"]))
+            )
 
         candidate = replace(self.config, **normalized)
         candidate.validate()
@@ -225,6 +246,8 @@ class StreamDiffusionEngine:
             "target_fps": "FPS上限",
             "temporal_feedback": "入力保持",
             "temporal_smoothing": "出力平滑化",
+            "latent_morph_strength": "生成特徴モーフ",
+            "latent_history_frames": "特徴履歴フレーム",
             "scene_cut_threshold": "シーン変化",
         }
         self.log("即時設定を更新しました: " + ", ".join(labels[name] for name in changed))
@@ -232,9 +255,12 @@ class StreamDiffusionEngine:
     def reset_temporal(self, log: bool = True) -> None:
         self._previous_input = None
         self._previous_output = None
+        self._latent_history.clear()
+        self._clear_stream_frame_buffer()
         self._scene_cut_detected = False
         self.last_motion_score = 0.0
         self.last_temporal_feedback = 0.0
+        self.last_latent_morph = 0.0
         if log:
             self.log("時間安定化の履歴をリセットしました。")
 
@@ -251,6 +277,9 @@ class StreamDiffusionEngine:
             self.log("ウォームアップ完了。")
 
         temporal_input = self._apply_temporal_feedback(fitted)
+        if self._scene_cut_detected:
+            self._latent_history.clear()
+            self._clear_stream_frame_buffer()
         started = time.perf_counter()
         output_tensor = self.stream(temporal_input)
         raw_output = self._postprocess_image(output_tensor, output_type="pil")[0].convert("RGB")
@@ -259,6 +288,91 @@ class StreamDiffusionEngine:
         self._previous_input = fitted.copy()
         self._previous_output = output.copy()
         return output, elapsed_ms
+
+    def _decode_with_latent_history(self, current_latent: Any) -> Any:
+        """Blend short generated-latent history, then run the original VAE decode."""
+        if self._original_decode_image is None:
+            raise RuntimeError("VAEデコーダーが初期化されていません。")
+        stabilized = self._stabilize_generated_latent(current_latent)
+        return self._original_decode_image(stabilized)
+
+    def _stabilize_generated_latent(self, current: Any) -> Any:
+        """Morph recent denoised features without creating an RGB afterimage."""
+        self.last_latent_morph = 0.0
+        if self._scene_cut_detected:
+            self._latent_history.clear()
+
+        strength = self.config.latent_morph_strength
+        frames = self.config.latent_history_frames
+        history = list(self._latent_history)[-frames:]
+
+        stabilized = current
+        if strength > 0.0 and history:
+            # Recent features receive more weight. History contains raw generated
+            # latents (not recursively blended output), so its lifetime is strictly
+            # bounded and does not accumulate a permanent trail.
+            weighted = history[0]
+            total_weight = 1.0
+            for weight, latent in enumerate(history[1:], start=2):
+                weighted = weighted + latent * float(weight)
+                total_weight += float(weight)
+            reference = weighted / total_weight
+
+            threshold = max(self.config.scene_cut_threshold, 1e-6)
+            motion_ratio = min(self.last_motion_score / threshold, 1.0)
+            motion_gate = max(0.0, 1.0 - motion_ratio * motion_ratio)
+            effective = strength * motion_gate
+            if effective > 0.0:
+                stabilized = current * (1.0 - effective) + reference * effective
+                stabilized = self._restore_latent_statistics(stabilized, current)
+                self.last_latent_morph = effective
+
+        self._latent_history.append(current.detach().clone())
+        while len(self._latent_history) > frames:
+            self._latent_history.popleft()
+        return stabilized
+
+    @staticmethod
+    def _restore_latent_statistics(stabilized: Any, current: Any) -> Any:
+        """Keep latent contrast from collapsing when several features are averaged."""
+        shape = getattr(current, "shape", ())
+        if len(shape) < 3:
+            return stabilized
+        spatial_count = 1
+        for dimension in shape[2:]:
+            spatial_count *= int(dimension)
+        if spatial_count <= 1:
+            return stabilized
+
+        spatial_dims = tuple(range(2, len(shape)))
+        current_float = current.float()
+        stabilized_float = stabilized.float()
+        current_mean = current_float.mean(dim=spatial_dims, keepdim=True)
+        stabilized_mean = stabilized_float.mean(dim=spatial_dims, keepdim=True)
+        current_std = current_float.var(
+            dim=spatial_dims,
+            keepdim=True,
+            unbiased=False,
+        ).add(1e-6).sqrt()
+        stabilized_std = stabilized_float.var(
+            dim=spatial_dims,
+            keepdim=True,
+            unbiased=False,
+        ).add(1e-6).sqrt()
+        scale = (current_std / stabilized_std).clamp(0.65, 1.55)
+        restored = (stabilized_float - stabilized_mean) * scale + current_mean
+        return restored.to(dtype=current.dtype)
+
+    def _clear_stream_frame_buffer(self) -> None:
+        """Remove StreamDiffusion's own previous-frame denoising state on a cut."""
+        if self.stream is None:
+            return
+        latent_buffer = getattr(self.stream, "x_t_latent_buffer", None)
+        if latent_buffer is not None and hasattr(latent_buffer, "zero_"):
+            latent_buffer.zero_()
+        stock_noise = getattr(self.stream, "stock_noise", None)
+        if stock_noise is not None and hasattr(stock_noise, "zero_"):
+            stock_noise.zero_()
 
     def _apply_temporal_feedback(self, current: Image.Image) -> Image.Image:
         self._scene_cut_detected = False
@@ -318,6 +432,7 @@ class StreamDiffusionEngine:
 
     def close(self) -> None:
         self.reset_temporal(log=False)
+        self._original_decode_image = None
         self.stream = None
         self.pipe = None
         if self._torch is not None and self._torch.cuda.is_available():
