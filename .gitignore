@@ -1,6 +1,8 @@
 .cache/
 .venv/
+.venv-trt/
 __pycache__/
 *.pyc
 models/
-
+engines/
+benchmarks/

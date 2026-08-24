@@ -14,6 +14,8 @@ class ReceivedFrame:
     width: int
     height: int
     received_at: float
+    receive_ms: float = 0.0
+    source_fps: float = 0.0
 
 
 class SpoutInput:
@@ -30,10 +32,15 @@ class SpoutInput:
         self._buffer: array.array[int] | None = None
         self._width = 0
         self._height = 0
+        self._saw_non_empty = False
+        self._last_sender_frame: int | None = None
+        self._last_sender_frame_at = 0.0
+        self._source_fps_ema = 0.0
 
     def receive(self) -> ReceivedFrame | None:
         from OpenGL import GL
 
+        started = time.perf_counter()
         result = self._receiver.receiveImage(
             self._buffer,
             GL.GL_RGBA,
@@ -48,6 +55,7 @@ class SpoutInput:
                 self._width = width
                 self._height = height
                 self._buffer = array.array("B", repeat(0, width * height * 4))
+                self._saw_non_empty = False
             return None
 
         if not result or self._buffer is None or self._width <= 0 or self._height <= 0:
@@ -58,8 +66,10 @@ class SpoutInput:
         if self._receiver.isFrameCountEnabled() and not self._receiver.isFrameNew():
             return None
 
-        if self._spout_module.helpers.isBufferEmpty(self._buffer):
-            return None
+        if not getattr(self, "_saw_non_empty", False):
+            if self._spout_module.helpers.isBufferEmpty(self._buffer):
+                return None
+            self._saw_non_empty = True
 
         rgba = Image.frombuffer(
             "RGBA",
@@ -69,12 +79,37 @@ class SpoutInput:
             "RGBA",
             0,
             1,
-        ).copy()
+        )
+        source_sampled_at = time.perf_counter()
+        source_fps = float(getattr(self, "_source_fps_ema", 0.0))
+        get_sender_frame = getattr(self._receiver, "getSenderFrame", None)
+        if callable(get_sender_frame):
+            try:
+                sender_frame = int(get_sender_frame())
+                last_frame = getattr(self, "_last_sender_frame", None)
+                last_at = float(getattr(self, "_last_sender_frame_at", 0.0))
+                if (
+                    last_frame is not None
+                    and sender_frame >= last_frame
+                    and source_sampled_at > last_at
+                ):
+                    instantaneous = (sender_frame - last_frame) / (source_sampled_at - last_at)
+                    previous = float(getattr(self, "_source_fps_ema", 0.0))
+                    source_fps = instantaneous if previous <= 0.0 else previous * 0.8 + instantaneous * 0.2
+                    self._source_fps_ema = source_fps
+                self._last_sender_frame = sender_frame
+                self._last_sender_frame_at = source_sampled_at
+            except (TypeError, ValueError, RuntimeError):
+                pass
+        rgb = rgba.convert("RGB")
+        received_at = time.perf_counter()
         return ReceivedFrame(
-            image=rgba.convert("RGB"),
+            image=rgb,
             width=self._width,
             height=self._height,
-            received_at=time.perf_counter(),
+            received_at=received_at,
+            receive_ms=(received_at - started) * 1000.0,
+            source_fps=source_fps,
         )
 
     def close(self) -> None:

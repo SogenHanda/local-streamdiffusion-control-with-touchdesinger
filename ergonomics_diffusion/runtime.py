@@ -20,9 +20,22 @@ class RuntimeMetrics:
     state: str = "停止"
     status: str = "待機中"
     input_fps: float = 0.0
+    source_fps: float = 0.0
     output_fps: float = 0.0
     inference_fps: float = 0.0
     inference_ms: float = 0.0
+    end_to_end_ms: float = 0.0
+    spout_receive_ms: float = 0.0
+    spout_send_ms: float = 0.0
+    input_age_ms: float = 0.0
+    preprocess_ms: float = 0.0
+    vae_encode_ms: float = 0.0
+    unet_ms: float = 0.0
+    vae_decode_ms: float = 0.0
+    postprocess_ms: float = 0.0
+    diffusion_ms: float = 0.0
+    active_backend: str = "-"
+    engine_status: str = "-"
     input_resolution: str = "-"
     output_resolution: str = "-"
     input_frames: int = 0
@@ -72,6 +85,9 @@ class InputSnapshot:
     fps: float
     frames: int
     resolution: str
+    source_fps: float = 0.0
+    receive_ms: float = 0.0
+    age_ms: float = 0.0
 
 
 class LatestFrameReceiver:
@@ -82,10 +98,12 @@ class LatestFrameReceiver:
         sender_name: str,
         flip_vertical: bool,
         parent_stop_event: threading.Event,
+        sample_fps: float = 30.0,
     ) -> None:
         self._sender_name = sender_name
         self._flip_vertical = flip_vertical
         self._parent_stop_event = parent_stop_event
+        self._sample_fps = sample_fps
         self._stop_event = threading.Event()
         self._condition = threading.Condition()
         self._thread: threading.Thread | None = None
@@ -106,7 +124,13 @@ class LatestFrameReceiver:
     def _run(self) -> None:
         try:
             with SpoutInput(self._sender_name, self._flip_vertical) as spout_input:
+                next_receive_at = 0.0
                 while not self._should_stop():
+                    now = time.perf_counter()
+                    if now < next_receive_at:
+                        self._stop_event.wait(min(next_receive_at - now, 0.05))
+                        continue
+                    next_receive_at = now + 1.0 / self._sample_fps
                     frame = spout_input.receive()
                     if frame is None:
                         time.sleep(0.001)
@@ -142,12 +166,20 @@ class LatestFrameReceiver:
 
     def snapshot(self, now: float | None = None) -> InputSnapshot:
         with self._condition:
+            sampled_at = now if now is not None else time.perf_counter()
             frame = self._latest_frame
             resolution = f"{frame.width} × {frame.height}" if frame is not None else "-"
             return InputSnapshot(
-                fps=self._rate.value(now),
+                fps=self._rate.value(sampled_at),
                 frames=self._frames,
                 resolution=resolution,
+                source_fps=frame.source_fps if frame is not None else 0.0,
+                receive_ms=frame.receive_ms if frame is not None else 0.0,
+                age_ms=(
+                    (sampled_at - frame.received_at) * 1000.0 + frame.receive_ms
+                    if frame is not None
+                    else 0.0
+                ),
             )
 
     def close(self) -> None:
@@ -278,6 +310,8 @@ class DiffusionWorker:
         try:
             engine = StreamDiffusionEngine(config, self._log)
             engine.load()
+            metrics.active_backend = engine.active_backend
+            metrics.engine_status = engine.engine_status
             metrics.state = "実行中"
             metrics.status = f"Spout入力待ち: {config.spout_input}"
             self._publish("state", "実行中")
@@ -286,6 +320,7 @@ class DiffusionWorker:
                 config.spout_input,
                 config.flip_input,
                 self._stop_event,
+                config.spout_sample_fps,
             )
             receiver.start()
             with SpoutOutput(config.spout_output, config.flip_output) as spout_output:
@@ -322,12 +357,22 @@ class DiffusionWorker:
                     output, inference_ms = engine.process(frame.image)
                     inference_rate.tick()
                     metrics.inference_ms = inference_ms
+                    for key, value in engine.last_stage_metrics.items():
+                        if hasattr(metrics, key):
+                            setattr(metrics, key, value)
                     metrics.motion_score = engine.last_motion_score
                     metrics.temporal_feedback = engine.last_temporal_feedback
                     metrics.latent_morph = engine.last_latent_morph
                     metrics.output_resolution = f"{output.width} × {output.height}"
 
-                    if spout_output.send(output):
+                    send_started = time.perf_counter()
+                    sent = spout_output.send(output)
+                    sent_at = time.perf_counter()
+                    metrics.spout_send_ms = (sent_at - send_started) * 1000.0
+                    metrics.end_to_end_ms = (
+                        (sent_at - frame.received_at) * 1000.0 + frame.receive_ms
+                    )
+                    if sent:
                         output_rate.tick()
                         metrics.output_frames += 1
                         metrics.status = "送受信中"
@@ -337,7 +382,7 @@ class DiffusionWorker:
 
                     completed_at = time.perf_counter()
                     self._copy_input_metrics(metrics, receiver.snapshot(completed_at))
-                    if completed_at - last_preview_at >= 0.15:
+                    if completed_at - last_preview_at >= 1.0 / config.preview_fps:
                         self._publish(
                             "preview",
                             {
@@ -419,8 +464,11 @@ class DiffusionWorker:
     @staticmethod
     def _copy_input_metrics(metrics: RuntimeMetrics, snapshot: InputSnapshot) -> None:
         metrics.input_fps = snapshot.fps
+        metrics.source_fps = snapshot.source_fps
         metrics.input_frames = snapshot.frames
         metrics.input_resolution = snapshot.resolution
+        metrics.spout_receive_ms = snapshot.receive_ms
+        metrics.input_age_ms = snapshot.age_ms
 
     @staticmethod
     def _preview(image: Image.Image, size: int) -> Image.Image:

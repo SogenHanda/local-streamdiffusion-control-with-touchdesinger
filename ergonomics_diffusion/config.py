@@ -24,6 +24,11 @@ class AppConfig:
     denoise_index: int = 32
     seed: int = 2
     target_fps: float = 30.0
+    spout_sample_fps: float = 30.0
+    preview_fps: float = 4.0
+    acceleration_backend: str = "auto"
+    tensorrt_engine_root: str = "engines/tensorrt"
+    tensorrt_cuda_graph: bool = False
     use_lcm_lora: bool = True
     lcm_steps: int = 1
     use_tiny_vae: bool = True
@@ -31,6 +36,8 @@ class AppConfig:
     temporal_smoothing: float = 0.15
     latent_morph_strength: float = 0.35
     latent_history_frames: int = 3
+    # Legacy JSON key retained for compatibility. It now controls gradual
+    # motion adaptation; automatic scene-cut resets are intentionally disabled.
     scene_cut_threshold: float = 0.35
     flip_input: bool = False
     flip_output: bool = False
@@ -84,16 +91,31 @@ class AppConfig:
             raise ValueError("変換の強さは0〜49の範囲で指定してください。")
         if not 0.1 <= self.target_fps <= 240:
             raise ValueError("FPS上限は0.1〜240の範囲で指定してください。")
+        if not 1.0 <= self.spout_sample_fps <= 240:
+            raise ValueError("Spout取得FPSは1〜240の範囲で指定してください。")
+        if not 0.5 <= self.preview_fps <= 30:
+            raise ValueError("UIプレビューFPSは0.5〜30の範囲で指定してください。")
+        if self.acceleration_backend not in {
+            "auto",
+            "tensorrt",
+            "xformers",
+            "pytorch",
+        }:
+            raise ValueError(
+                "推論バックエンドはauto / tensorrt / xformers / pytorchから選択してください。"
+            )
+        if not self.tensorrt_engine_root.strip():
+            raise ValueError("TensorRTエンジン保存先を入力してください。")
         if not 0.0 <= self.temporal_feedback <= 0.8:
             raise ValueError("入力フレーム保持は0〜0.8の範囲で指定してください。")
-        if not 0.0 <= self.temporal_smoothing <= 0.8:
-            raise ValueError("出力平滑化は0〜0.8の範囲で指定してください。")
-        if not 0.0 <= self.latent_morph_strength <= 0.8:
-            raise ValueError("生成特徴モーフは0〜0.8の範囲で指定してください。")
+        if not 0.0 <= self.temporal_smoothing <= 1.0:
+            raise ValueError("出力平滑化は0〜1の範囲で指定してください。")
+        if not 0.0 <= self.latent_morph_strength <= 1.0:
+            raise ValueError("生成特徴モーフは0〜1の範囲で指定してください。")
         if not 2 <= self.latent_history_frames <= 8:
             raise ValueError("特徴履歴フレームは2〜8の範囲で指定してください。")
-        if not 0.05 <= self.scene_cut_threshold <= 1.0:
-            raise ValueError("シーン変化リセットは0.05〜1.0の範囲で指定してください。")
+        if not 0.0 <= self.scene_cut_threshold <= 1.0:
+            raise ValueError("動き追従しきい値は0〜1の範囲で指定してください。")
         if not self.prompt.strip():
             raise ValueError("プロンプトを入力してください。")
 
@@ -112,6 +134,10 @@ class AppConfig:
     @property
     def resolved_tiny_vae_path(self) -> Path:
         return self.resolve_path(self.tiny_vae_path)
+
+    @property
+    def resolved_tensorrt_engine_root(self) -> Path:
+        return self.resolve_path(self.tensorrt_engine_root)
 
     def to_public_dict(self) -> dict[str, Any]:
         """Return settings safe to display in the UI and logs."""

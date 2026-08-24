@@ -15,10 +15,14 @@ def main() -> None:
         default=DEFAULT_CONFIG_PATH,
         help="Path to the JSON configuration file",
     )
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Start generation automatically after the UI is ready",
+    )
     args = parser.parse_args()
-    run_ui(config_path=args.config.resolve())
+    run_ui(config_path=args.config.resolve(), autostart=args.autostart)
 
 
 if __name__ == "__main__":
     main()
-
