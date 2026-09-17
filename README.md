@@ -33,7 +33,7 @@ local_streamdiffusion_td/    TouchDesignerプロジェクトと補助スクリ�
 - TouchDesigner 2023または2025
 - 初回セットアップ時のみインターネット接続
 
-RTX 4070 Ti 12GBとRTX 4090 Laptopを想定しています。Python 3.11などが
+RTX 4070ti以上のGPUを搭載しているPCを想定しています。Python 3.11などが
 すでに入っていても削除する必要はありません。Python 3.10を追加でインストールし、
 このプロジェクト専用の仮想環境として共存させます。
 
