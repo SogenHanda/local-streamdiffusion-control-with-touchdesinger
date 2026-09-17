@@ -51,9 +51,8 @@ nvidia-smi
 
 ## 新しいPCへの初回セットアップ
 
-### 1. Privateリポジトリをcloneする
+### 1. リポジトリをcloneする
 
-GitHubでこのPrivateリポジトリを参照できるアカウントを使用してください。
 初回clone時はGit Credential Managerのブラウザ認証が表示される場合があります。
 
 ```powershell
