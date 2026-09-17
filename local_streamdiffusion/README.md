@@ -2,6 +2,11 @@
 
 TouchDesignerからSpoutで受け取った映像を、ローカルのStreamDiffusionで連続img2img処理し、SpoutでTouchDesignerへ戻すWindows用アプリです。標準構成はDreamShaper 8 + LCM-LoRAの1-stepリアルタイム推論です。直近2〜8枚の生成latent（VAE変換前の生成特徴）を動き量に応じてモーフさせることで、RGB画像の重ね合わせで生じる残像や白い輪郭を抑えながら、フレームごとの急激な絵柄変化を抑えます。APIやクラウドサービスは使用しません。
 
+新しいPCへのclone、Python 3.10の追加、全モデルの取得、TensorRT環境、
+TouchDesigner起動までの通し手順は
+[`../README.md`](../README.md)を先に参照してください。このREADMEではPython推論側の
+詳細設定とトラブルシューティングを説明します。
+
 ## 構成
 
 ```text
@@ -74,7 +79,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\setup_tensorrt.ps1
 ```
 
-次に、UIで使用するモデル・解像度・step数・LCM-LoRAを選び、「現在設定をビルド」を押します。コマンドから行う場合は次です。初回ビルドは10〜30分程度かかることがあります。
+最初はTouchDesigner側のBackendを`Auto`または`xFormers`にして起動し、使用する
+モデル・解像度・PerformanceをOSCで反映します。`config.json`へ保存されたことを
+確認してアプリをStopした後、次を実行します。初回ビルドは10〜30分程度かかることがあります。
 
 ```powershell
 .\build_tensorrt_engine.cmd
