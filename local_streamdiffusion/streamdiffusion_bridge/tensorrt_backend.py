@@ -264,7 +264,7 @@ def build_unet_engine(
     cache.metadata_path.write_text(
         json.dumps(
             {
-                "format": "ergonomics-streamdiffusion-tensorrt-unet",
+                "format": "local-streamdiffusion-tensorrt-unet",
                 "spec": asdict(cache.spec),
             },
             ensure_ascii=False,
@@ -323,7 +323,7 @@ def activate_unet_engine(
         use_cuda_graph=False,
     )
     # The wrapper needs the Polygraphy stream to outlive every inference call.
-    wrapper._ergonomics_cuda_stream = polygraphy_stream
+    wrapper._streamdiffusion_cuda_stream = polygraphy_stream
 
     original_unet = stream.unet
     original_unet.to(torch.device("cpu"))

@@ -6,8 +6,8 @@ from typing import Any
 import torch
 from PIL import Image
 
-from ergonomics_diffusion.config import AppConfig
-from ergonomics_diffusion.engine import StreamDiffusionEngine
+from streamdiffusion_bridge.config import AppConfig
+from streamdiffusion_bridge.engine import StreamDiffusionEngine
 
 
 class FakeImageProcessor:

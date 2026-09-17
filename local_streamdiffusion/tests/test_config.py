@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ergonomics_diffusion.config import AppConfig
+from streamdiffusion_bridge.config import AppConfig
 
 
 class AppConfigTests(unittest.TestCase):

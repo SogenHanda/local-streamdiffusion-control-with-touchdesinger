@@ -3,9 +3,9 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from ergonomics_diffusion.config import AppConfig
-from ergonomics_diffusion.engine import StreamDiffusionEngine
-from ergonomics_diffusion.tensorrt_backend import TensorRTStatus
+from streamdiffusion_bridge.config import AppConfig
+from streamdiffusion_bridge.engine import StreamDiffusionEngine
+from streamdiffusion_bridge.tensorrt_backend import TensorRTStatus
 
 
 class FakePipe:
@@ -23,7 +23,7 @@ class AccelerationBackendTests(unittest.TestCase):
         engine.pipe = FakePipe()
         engine.stream = object()
         with patch(
-            "ergonomics_diffusion.engine.inspect_tensorrt",
+            "streamdiffusion_bridge.engine.inspect_tensorrt",
             return_value=TensorRTStatus("missing", "engine missing"),
         ):
             engine._configure_acceleration_backend()
@@ -40,7 +40,7 @@ class AccelerationBackendTests(unittest.TestCase):
         engine.pipe = FakePipe()
         engine.stream = object()
         with patch(
-            "ergonomics_diffusion.engine.inspect_tensorrt",
+            "streamdiffusion_bridge.engine.inspect_tensorrt",
             return_value=TensorRTStatus("missing", "engine missing"),
         ):
             with self.assertRaises(RuntimeError):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from ergonomics_diffusion.spout_transport import SpoutInput, SpoutOutput
+from streamdiffusion_bridge.spout_transport import SpoutInput, SpoutOutput
 
 
 class FakeReceiver:

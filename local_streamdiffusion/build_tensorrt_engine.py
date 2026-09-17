@@ -5,9 +5,9 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from ergonomics_diffusion.config import AppConfig, DEFAULT_CONFIG_PATH
-from ergonomics_diffusion.engine import StreamDiffusionEngine
-from ergonomics_diffusion.tensorrt_backend import inspect_tensorrt
+from streamdiffusion_bridge.config import AppConfig, DEFAULT_CONFIG_PATH
+from streamdiffusion_bridge.engine import StreamDiffusionEngine
+from streamdiffusion_bridge.tensorrt_backend import inspect_tensorrt
 
 
 def parse_args() -> argparse.Namespace:

@@ -7,8 +7,8 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
-from ergonomics_diffusion.config import AppConfig
-from ergonomics_diffusion.tensorrt_backend import cache_for, inspect_tensorrt
+from streamdiffusion_bridge.config import AppConfig
+from streamdiffusion_bridge.tensorrt_backend import cache_for, inspect_tensorrt
 
 
 class FakeCuda:
@@ -68,7 +68,7 @@ class TensorRTCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = self.make_config(directory)
             with patch(
-                "ergonomics_diffusion.tensorrt_backend.missing_tensorrt_modules",
+                "streamdiffusion_bridge.tensorrt_backend.missing_tensorrt_modules",
                 return_value=(),
             ):
                 cache = cache_for(config, FakeTorch)

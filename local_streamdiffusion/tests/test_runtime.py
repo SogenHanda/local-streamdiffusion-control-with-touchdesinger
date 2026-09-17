@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from ergonomics_diffusion.runtime import DiffusionWorker, LatestFrameReceiver, WorkerEvent
-from ergonomics_diffusion.spout_transport import ReceivedFrame
+from streamdiffusion_bridge.runtime import DiffusionWorker, LatestFrameReceiver, WorkerEvent
+from streamdiffusion_bridge.spout_transport import ReceivedFrame
 
 
 class FakeSpoutInput:
@@ -38,7 +38,7 @@ class FakeSpoutInput:
 class LatestFrameReceiverTests(unittest.TestCase):
     def test_receiver_keeps_newest_frame_and_counts_all_inputs(self) -> None:
         stop_event = threading.Event()
-        with patch("ergonomics_diffusion.runtime.SpoutInput", FakeSpoutInput):
+        with patch("streamdiffusion_bridge.runtime.SpoutInput", FakeSpoutInput):
             receiver = LatestFrameReceiver("camera", False, stop_event)
             receiver.start()
             deadline = time.perf_counter() + 1.0

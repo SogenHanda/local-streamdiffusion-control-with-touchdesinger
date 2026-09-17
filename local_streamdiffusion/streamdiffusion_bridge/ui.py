@@ -24,13 +24,17 @@ from .model_catalog import (
 from .osc_control import (
     OSC_CONFIG_DEBOUNCE_MS,
     OSC_HOST,
+    OSC_MONITOR_HOST,
+    OSC_MONITOR_PORT,
     OSC_PORT,
     OSCCommand,
     OSCEvent,
     OSCMessage,
+    OSCUDPSender,
     OSCUDPServer,
     apply_osc_config,
     decode_control_message,
+    monitor_messages,
 )
 from .runtime import DiffusionWorker, WorkerEvent
 from .tensorrt_backend import inspect_tensorrt
@@ -54,45 +58,47 @@ OSC_MONITOR_GROUPS = (
     (
         "LIVE / 即時反映",
         (
-            "/ergonomics/live/prompt",
-            "/ergonomics/live/strength",
-            "/ergonomics/live/seed",
-            "/ergonomics/live/target_fps",
-            "/ergonomics/live/input_feedback",
-            "/ergonomics/live/output_smoothing",
-            "/ergonomics/live/latent_morph",
-            "/ergonomics/live/history_frames",
-            "/ergonomics/live/motion_threshold",
+            "/streamdiffusion/live/prompt",
+            "/streamdiffusion/live/strength",
+            "/streamdiffusion/live/seed",
+            "/streamdiffusion/live/target_fps",
+            "/streamdiffusion/live/input_feedback",
+            "/streamdiffusion/live/output_smoothing",
+            "/streamdiffusion/live/latent_morph",
+            "/streamdiffusion/live/history_frames",
+            "/streamdiffusion/live/motion_threshold",
         ),
     ),
     (
         "CONFIG / 再初期化",
         (
-            "/ergonomics/config/model_index",
-            "/ergonomics/config/backend_index",
-            "/ergonomics/config/width",
-            "/ergonomics/config/height",
-            "/ergonomics/config/performance_index",
-            "/ergonomics/config/spout_input",
-            "/ergonomics/config/spout_output",
-            "/ergonomics/config/spout_sample_fps",
-            "/ergonomics/config/apply",
+            "/streamdiffusion/config/model_index",
+            "/streamdiffusion/config/backend_index",
+            "/streamdiffusion/config/width",
+            "/streamdiffusion/config/height",
+            "/streamdiffusion/config/performance_index",
+            "/streamdiffusion/config/spout_input",
+            "/streamdiffusion/config/spout_output",
+            "/streamdiffusion/config/spout_sample_fps",
+            "/streamdiffusion/config/apply",
         ),
     ),
     (
         "SYSTEM / 操作",
         (
-            "/ergonomics/system/start",
-            "/ergonomics/system/stop",
-            "/ergonomics/temporal/reset",
+            "/streamdiffusion/system/start",
+            "/streamdiffusion/system/stop",
+            "/streamdiffusion/system/shutdown",
+            "/streamdiffusion/temporal/reset",
         ),
     ),
 )
 OSC_TRIGGER_ADDRESSES = {
-    "/ergonomics/config/apply",
-    "/ergonomics/system/start",
-    "/ergonomics/system/stop",
-    "/ergonomics/temporal/reset",
+    "/streamdiffusion/config/apply",
+    "/streamdiffusion/system/start",
+    "/streamdiffusion/system/stop",
+    "/streamdiffusion/system/shutdown",
+    "/streamdiffusion/temporal/reset",
 }
 
 
@@ -102,9 +108,15 @@ class DiffusionApp(tk.Tk):
         config_path: Path = DEFAULT_CONFIG_PATH,
         *,
         autostart: bool = False,
+        hidden: bool = False,
     ) -> None:
         super().__init__()
-        self.title("Ergonomics Local Diffusion Monitor")
+        self._hidden = bool(hidden)
+        if self._hidden:
+            # Keep Tk's event loop and OSC controller alive without creating a
+            # taskbar/window entry when TouchDesigner is the operation UI.
+            self.withdraw()
+        self.title("Local StreamDiffusion Monitor")
         self.geometry("1400x960")
         self.minsize(1160, 800)
         self.configure(bg=BACKGROUND)
@@ -119,6 +131,9 @@ class DiffusionApp(tk.Tk):
         self._trt_build_process: subprocess.Popen[str] | None = None
         self.osc_events: "queue.Queue[OSCEvent]" = queue.Queue(maxsize=256)
         self.osc_server: OSCUDPServer | None = None
+        self.osc_monitor_sender = OSCUDPSender(OSC_MONITOR_HOST, OSC_MONITOR_PORT)
+        self._osc_monitor_error_logged = False
+        self._last_metrics: dict[str, Any] = {}
         self._osc_pending_config: dict[str, Any] = {}
         self._osc_config_after_id: str | None = None
         self._osc_restart_config: AppConfig | None = None
@@ -132,13 +147,25 @@ class DiffusionApp(tk.Tk):
             config = AppConfig.load(config_path)
         except Exception as exc:
             config = AppConfig()
-            messagebox.showwarning("設定読込エラー", f"既定設定で起動します。\n\n{exc}")
+            if self._hidden:
+                print(f"設定読込エラー。既定設定で起動します: {exc}")
+            else:
+                messagebox.showwarning("設定読込エラー", f"既定設定で起動します。\n\n{exc}")
 
         self._configure_styles()
         self._create_variables(config)
         self._build_monitor_only_ui()
         self._set_controls_for_state("停止")
         self._start_osc_server()
+        self._append_log(
+            f"OSC監視値の送信先: udp://{OSC_MONITOR_HOST}:{OSC_MONITOR_PORT}"
+        )
+        self._send_monitor_osc(
+            {
+                "state": "停止",
+                "status": "TouchDesignerからのOSC Startを待っています。",
+            }
+        )
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll_events)
         if autostart:
@@ -262,7 +289,7 @@ class DiffusionApp(tk.Tk):
         ttk.Label(
             header,
             text=(
-                "TouchDesigner / OSC control / Spout / StreamDiffusion — "
+                "OSC IN 13001 / MONITOR OUT 9001 / Spout / StreamDiffusion — "
                 "Python側は監視専用"
             ),
             style="Subtitle.TLabel",
@@ -1093,6 +1120,7 @@ class DiffusionApp(tk.Tk):
             config.validate()
             config.save(self.config_path)
             self.worker.start(config)
+            self._sync_live_state_to_worker()
             self._generation_desired = True
             self._append_log("生成開始を要求しました。")
             self._set_controls_for_state("起動中")
@@ -1150,34 +1178,57 @@ class DiffusionApp(tk.Tk):
         if not self.worker.running:
             return
         try:
-            settings = {
-                "denoise_index": int(round(self.denoise_var.get())),
-                "seed": int(self.seed_var.get()),
-                "target_fps": float(self.target_fps_var.get()),
-                "temporal_feedback": float(self.temporal_feedback_var.get()),
-                "temporal_smoothing": float(self.temporal_smoothing_var.get()),
-                "latent_morph_strength": float(self.latent_morph_strength_var.get()),
-                "latent_history_frames": int(round(self.latent_history_frames_var.get())),
-                "scene_cut_threshold": float(self.scene_cut_threshold_var.get()),
-            }
-            if not 0 <= settings["denoise_index"] <= 49:
-                raise ValueError("変換強度が範囲外です。")
-            if not 0.1 <= settings["target_fps"] <= 240:
-                raise ValueError("FPS上限が範囲外です。")
-            if not 0.0 <= settings["temporal_feedback"] <= 0.8:
-                raise ValueError("入力フレーム保持が範囲外です。")
-            if not 0.0 <= settings["temporal_smoothing"] <= 1.0:
-                raise ValueError("出力平滑化が範囲外です。")
-            if not 0.0 <= settings["latent_morph_strength"] <= 1.0:
-                raise ValueError("生成特徴モーフが範囲外です。")
-            if not 2 <= settings["latent_history_frames"] <= 8:
-                raise ValueError("特徴履歴フレームが範囲外です。")
-            if not 0.0 <= settings["scene_cut_threshold"] <= 1.0:
-                raise ValueError("動き追従しきい値が範囲外です。")
+            settings = self._current_live_settings()
         except (tk.TclError, TypeError, ValueError):
             # Spinbox text may be temporarily empty while the user is editing it.
             return
         self.worker.update_live_settings(settings)
+
+    def _current_live_settings(self) -> dict[str, int | float]:
+        """Return the complete validated realtime state currently shown by the UI."""
+        settings: dict[str, int | float] = {
+            "denoise_index": int(round(self.denoise_var.get())),
+            "seed": int(self.seed_var.get()),
+            "target_fps": float(self.target_fps_var.get()),
+            "temporal_feedback": float(self.temporal_feedback_var.get()),
+            "temporal_smoothing": float(self.temporal_smoothing_var.get()),
+            "latent_morph_strength": float(self.latent_morph_strength_var.get()),
+            "latent_history_frames": int(round(self.latent_history_frames_var.get())),
+            "scene_cut_threshold": float(self.scene_cut_threshold_var.get()),
+        }
+        if not 0 <= settings["denoise_index"] <= 49:
+            raise ValueError("変換強度が範囲外です。")
+        if not 0.1 <= settings["target_fps"] <= 240:
+            raise ValueError("FPS上限が範囲外です。")
+        if not 0.0 <= settings["temporal_feedback"] <= 0.8:
+            raise ValueError("入力フレーム保持が範囲外です。")
+        if not 0.0 <= settings["temporal_smoothing"] <= 1.0:
+            raise ValueError("出力平滑化が範囲外です。")
+        if not 0.0 <= settings["latent_morph_strength"] <= 1.0:
+            raise ValueError("生成特徴モーフが範囲外です。")
+        if not 2 <= settings["latent_history_frames"] <= 8:
+            raise ValueError("特徴履歴フレームが範囲外です。")
+        if not 0.0 <= settings["scene_cut_threshold"] <= 1.0:
+            raise ValueError("動き追従しきい値が範囲外です。")
+        return settings
+
+    def _sync_live_state_to_worker(self) -> None:
+        """Re-send the full live state after every worker start or resume."""
+        if not self.worker.running:
+            return
+        try:
+            prompt = self.prompt_text.get("1.0", "end").strip()
+            settings = self._current_live_settings()
+        except (tk.TclError, TypeError, ValueError) as exc:
+            self._append_log(f"リアルタイム設定を再同期できません: {exc}")
+            return
+        if prompt:
+            self.worker.update_prompt(prompt)
+        self.worker.update_live_settings(settings)
+        # A new/resumed worker must not inherit the assumption that a value was
+        # already applied to the previous engine instance.
+        self._osc_last_live_values.clear()
+        self._append_log("現在のリアルタイム設定を推論エンジンへ再同期しました。")
 
     def _reset_temporal(self) -> None:
         if self.worker.running:
@@ -1294,18 +1345,20 @@ class DiffusionApp(tk.Tk):
             return False
         # The launcher sends only positive triggers. Let the opposite transport
         # command re-arm Start/Stop even when no explicit falling edge is sent.
-        if message.address == "/ergonomics/system/start":
-            self._osc_trigger_active["/ergonomics/system/stop"] = False
-        elif message.address == "/ergonomics/system/stop":
-            self._osc_trigger_active["/ergonomics/system/start"] = False
+        if message.address == "/streamdiffusion/system/start":
+            self._osc_trigger_active["/streamdiffusion/system/stop"] = False
+        elif message.address == "/streamdiffusion/system/stop":
+            self._osc_trigger_active["/streamdiffusion/system/start"] = False
         return True
 
     def _handle_osc_command(self, command: OSCCommand) -> None:
         if command.category == "live":
             if self._osc_last_live_values.get(command.name) == command.value:
                 return
-            self._osc_last_live_values[command.name] = command.value
             self._apply_osc_live_value(command.name, command.value)
+            # Cache only after the UI/worker hand-off succeeded. An invalid UI
+            # assignment must remain retryable when TouchDesigner sends it again.
+            self._osc_last_live_values[command.name] = command.value
             return
         if command.category == "config":
             if self._osc_last_config_values.get(command.name) == command.value:
@@ -1321,6 +1374,9 @@ class DiffusionApp(tk.Tk):
             self._start_from_osc()
         elif command.name == "stop":
             self._stop_from_osc()
+        elif command.name == "shutdown":
+            self._append_log("TouchDesignerからアプリ終了を要求しました。")
+            self.after_idle(self._on_close)
         elif command.name == "reset_temporal":
             if self.worker.running:
                 self.worker.reset_temporal()
@@ -1455,6 +1511,7 @@ class DiffusionApp(tk.Tk):
         if self._osc_pending_config:
             self._apply_pending_osc_config(start_if_stopped=True)
             return
+
         if self.worker.running or self._osc_restart_config is not None:
             self._append_log("OSC Startを受信しましたが、推論はすでに動作中です。")
             return
@@ -1480,6 +1537,7 @@ class DiffusionApp(tk.Tk):
             self.status_detail_var.set(str(exc).splitlines()[0])
             self._generation_desired = False
             return
+        self._sync_live_state_to_worker()
         self._generation_desired = True
         self._append_log("OSCから生成開始を要求しました。")
         self._set_controls_for_state("起動中")
@@ -1523,14 +1581,11 @@ class DiffusionApp(tk.Tk):
         self._osc_restart_after_id = None
 
     def _stop_from_osc(self) -> None:
+        # Do not leave a paused worker/model/Spout sender behind. A transport
+        # Stop closes this entire app; the next Run launches one clean instance.
         self._generation_desired = False
-        self._cancel_osc_restart()
-        if self.worker.running:
-            self.worker.stop()
-            self.status_detail_var.set("OSC Stop: 現在の推論終了を待っています…")
-            self._append_log("OSCから停止を要求しました。")
-        else:
-            self._append_log("OSC Stopを受信しました（推論は停止済みです）。")
+        self._append_log("OSC Stopを受信しました。アプリを完全終了します。")
+        self.after_idle(self._on_close)
 
     def _poll_events(self) -> None:
         self._poll_osc_events()
@@ -1567,6 +1622,7 @@ class DiffusionApp(tk.Tk):
             self._refresh_tensorrt_status()
 
     def _update_metrics(self, metrics: dict[str, Any]) -> None:
+        self._last_metrics = dict(metrics)
         self.status_detail_var.set(str(metrics.get("status", "")))
         self.metric_vars["input_fps"].set(f"{metrics.get('input_fps', 0):.1f}")
         source_fps = metrics.get("source_fps", 0)
@@ -1602,6 +1658,19 @@ class DiffusionApp(tk.Tk):
         self.metric_vars["latent_morph"].set(
             f"{metrics.get('latent_morph', 0) * 100:.0f} %"
         )
+        self._send_monitor_osc(metrics)
+
+    def _send_monitor_osc(self, metrics: dict[str, Any]) -> None:
+        try:
+            self.osc_monitor_sender.send_bundle(monitor_messages(metrics))
+        except OSError as exc:
+            if not self._osc_monitor_error_logged:
+                self._append_log(
+                    f"OSC監視値を {OSC_MONITOR_HOST}:{OSC_MONITOR_PORT} へ送信できません: {exc}"
+                )
+                self._osc_monitor_error_logged = True
+        else:
+            self._osc_monitor_error_logged = False
 
     def _set_preview(self, key: str, label: tk.Label, image: Image.Image) -> None:
         canvas = Image.new("RGB", (256, 256), "#090c10")
@@ -1685,6 +1754,10 @@ class DiffusionApp(tk.Tk):
     def _on_close(self) -> None:
         self._closing = True
         self._generation_desired = False
+        final_metrics = dict(self._last_metrics)
+        final_metrics.update(state="停止", status="アプリを終了しました。")
+        self._send_monitor_osc(final_metrics)
+        self.osc_monitor_sender.close()
         self._cancel_osc_config_timer()
         self._cancel_osc_restart()
         if self._live_update_after_id is not None:
@@ -1701,6 +1774,11 @@ def run_ui(
     config_path: Path = DEFAULT_CONFIG_PATH,
     *,
     autostart: bool = False,
+    hidden: bool = False,
 ) -> None:
-    app = DiffusionApp(config_path=config_path, autostart=autostart)
+    app = DiffusionApp(
+        config_path=config_path,
+        autostart=autostart,
+        hidden=hidden,
+    )
     app.mainloop()

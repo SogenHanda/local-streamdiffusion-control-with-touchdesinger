@@ -1,0 +1,10 @@
+# TouchDesigner-generated backups and local media are not suitable for GitHub.
+/Backup/
+/Movie/
+/Audio/
+/Chan/
+/Geo/
+/Image/
+/local_streamdiffusion_td.*.toe
+__pycache__/
+*.pyc

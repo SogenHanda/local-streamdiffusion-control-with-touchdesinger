@@ -1,8 +1,12 @@
-.cache/
-.venv/
-.venv-trt/
-__pycache__/
-*.pyc
-models/
-engines/
-benchmarks/
+# This repository intentionally tracks only the reusable Python and
+# TouchDesigner projects. Historical experiments remain local.
+/.pnpm-store/
+/archive_*/
+/assets_source_video_edit/
+/reference_tox_analysis/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

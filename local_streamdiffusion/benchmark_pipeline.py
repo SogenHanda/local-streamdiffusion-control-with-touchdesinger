@@ -11,8 +11,8 @@ from typing import Any
 
 from PIL import Image, ImageStat
 
-from ergonomics_diffusion.config import AppConfig, DEFAULT_CONFIG_PATH
-from ergonomics_diffusion.engine import StreamDiffusionEngine
+from streamdiffusion_bridge.config import AppConfig, DEFAULT_CONFIG_PATH
+from streamdiffusion_bridge.engine import StreamDiffusionEngine
 
 
 def parse_args() -> argparse.Namespace:

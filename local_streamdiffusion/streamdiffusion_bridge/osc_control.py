@@ -14,6 +14,9 @@ from .model_catalog import BUILTIN_MODEL_PROFILES, PERFORMANCE_PRESETS
 OSC_HOST = "127.0.0.1"
 OSC_PORT = 13001
 OSC_CONFIG_DEBOUNCE_MS = 350
+OSC_MONITOR_HOST = "127.0.0.1"
+OSC_MONITOR_PORT = 9001
+OSC_MONITOR_PREFIX = "/streamdiffusion/monitor"
 
 BACKEND_INDEX = ("auto", "tensorrt", "xformers", "pytorch")
 
@@ -39,6 +42,158 @@ class OSCCommand:
 
 class OSCDecodeError(ValueError):
     pass
+
+
+def _encode_padded_string(value: str) -> bytes:
+    encoded = value.encode("utf-8") + b"\0"
+    return encoded + b"\0" * ((-len(encoded)) % 4)
+
+
+def encode_osc_message(message: OSCMessage) -> bytes:
+    """Encode one OSC 1.0 message using TouchDesigner-compatible types."""
+    if not message.address.startswith("/"):
+        raise ValueError(f"OSC address must start with '/': {message.address!r}")
+
+    tags: list[str] = []
+    payload = bytearray()
+    for value in message.args:
+        if isinstance(value, bool):
+            tags.append("T" if value else "F")
+        elif value is None:
+            tags.append("N")
+        elif isinstance(value, int):
+            if -(2**31) <= value < 2**31:
+                tags.append("i")
+                payload.extend(struct.pack(">i", value))
+            else:
+                tags.append("h")
+                payload.extend(struct.pack(">q", value))
+        elif isinstance(value, float):
+            tags.append("f")
+            payload.extend(struct.pack(">f", value))
+        elif isinstance(value, str):
+            tags.append("s")
+            payload.extend(_encode_padded_string(value))
+        else:
+            raise TypeError(f"Unsupported OSC value type: {type(value).__name__}")
+
+    return (
+        _encode_padded_string(message.address)
+        + _encode_padded_string("," + "".join(tags))
+        + bytes(payload)
+    )
+
+
+def encode_osc_bundle(messages: list[OSCMessage] | tuple[OSCMessage, ...]) -> bytes:
+    """Encode messages as one immediately applicable OSC bundle."""
+    packet = bytearray(b"#bundle\0")
+    packet.extend(struct.pack(">Q", 1))  # OSC immediate timetag.
+    for message in messages:
+        encoded = encode_osc_message(message)
+        packet.extend(struct.pack(">i", len(encoded)))
+        packet.extend(encoded)
+    return bytes(packet)
+
+
+def _resolution_components(value: Any) -> tuple[int, int]:
+    normalized = str(value or "").lower().replace("×", "x")
+    parts = [part.strip() for part in normalized.split("x", 1)]
+    if len(parts) != 2:
+        return 0, 0
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return 0, 0
+
+
+def monitor_messages(metrics: dict[str, Any]) -> list[OSCMessage]:
+    """Convert the monitor cards into stable OSC addresses and raw values."""
+    state = str(metrics.get("state", "停止"))
+    prefix = OSC_MONITOR_PREFIX
+    messages = [
+        OSCMessage(f"{prefix}/state", (state,)),
+        OSCMessage(f"{prefix}/status", (str(metrics.get("status", "")),)),
+        OSCMessage(f"{prefix}/running", (int(state in {"起動中", "実行中"}),)),
+    ]
+
+    float_fields = (
+        "input_fps",
+        "source_fps",
+        "output_fps",
+        "inference_fps",
+        "inference_ms",
+        "end_to_end_ms",
+        "gpu_utilization",
+        "vram_used_mb",
+        "vram_total_mb",
+        "gpu_temperature",
+        "spout_receive_ms",
+        "spout_send_ms",
+        "input_age_ms",
+        "preprocess_ms",
+        "vae_encode_ms",
+        "unet_ms",
+        "vae_decode_ms",
+        "postprocess_ms",
+        "motion_score",
+        "temporal_feedback",
+        "latent_morph",
+    )
+    messages.extend(
+        OSCMessage(f"{prefix}/{name}", (float(metrics.get(name, 0.0) or 0.0),))
+        for name in float_fields
+    )
+    messages.append(
+        OSCMessage(
+            f"{prefix}/active_backend",
+            (str(metrics.get("active_backend", "-")),),
+        )
+    )
+
+    for label in ("input", "output"):
+        value = str(metrics.get(f"{label}_resolution", "-") or "-")
+        width, height = _resolution_components(value)
+        messages.extend(
+            (
+                OSCMessage(f"{prefix}/{label}_resolution", (value,)),
+                OSCMessage(f"{prefix}/{label}_width", (width,)),
+                OSCMessage(f"{prefix}/{label}_height", (height,)),
+            )
+        )
+    return messages
+
+
+class OSCUDPSender:
+    """Small reusable UDP sender for OSC messages and bundles."""
+
+    def __init__(
+        self,
+        host: str = OSC_MONITOR_HOST,
+        port: int = OSC_MONITOR_PORT,
+    ) -> None:
+        self.host = host
+        self.port = int(port)
+        self._socket: socket.socket | None = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+        )
+        self._socket.settimeout(0.05)
+        self._lock = threading.Lock()
+
+    def send_bundle(self, messages: list[OSCMessage] | tuple[OSCMessage, ...]) -> None:
+        packet = encode_osc_bundle(messages)
+        with self._lock:
+            sock = self._socket
+            if sock is None:
+                return
+            sock.sendto(packet, (self.host, self.port))
+
+    def close(self) -> None:
+        with self._lock:
+            sock = self._socket
+            self._socket = None
+            if sock is not None:
+                sock.close()
 
 
 def _read_padded_string(data: bytes, offset: int) -> tuple[str, int]:
@@ -168,80 +323,81 @@ def decode_control_message(message: OSCMessage) -> OSCCommand | None:
     """Validate an OSC message and convert it into an application command."""
     address = message.address
 
-    if address == "/ergonomics/live/prompt":
+    if address == "/streamdiffusion/live/prompt":
         value = _one_arg(message)
         if not isinstance(value, str) or not value.strip():
             raise ValueError("promptは空でない文字列を送ってください。")
         return OSCCommand("live", "prompt", value.strip())
-    if address == "/ergonomics/live/strength":
+    if address == "/streamdiffusion/live/strength":
         strength = _ranged(_one_arg(message), "strength", 0.0, 1.0)
         # The StreamDiffusion t-index runs in the opposite direction from the
         # artist-facing 0=input / 1=full generation strength.
         return OSCCommand("live", "denoise_index", int(round((1.0 - strength) * 49)))
-    if address == "/ergonomics/live/seed":
+    if address == "/streamdiffusion/live/seed":
         value = _integer(_one_arg(message), "seed")
         if not -1 <= value <= 2_147_483_647:
             raise ValueError("seedは -1〜2147483647 の範囲で送ってください。")
         return OSCCommand("live", "seed", value)
-    if address == "/ergonomics/live/target_fps":
+    if address == "/streamdiffusion/live/target_fps":
         value = _ranged(_one_arg(message), "target_fps", 0.1, 240.0)
         return OSCCommand("live", "target_fps", value)
-    if address == "/ergonomics/live/input_feedback":
+    if address == "/streamdiffusion/live/input_feedback":
         value = _ranged(_one_arg(message), "input_feedback", 0.0, 0.8)
         return OSCCommand("live", "temporal_feedback", value)
-    if address == "/ergonomics/live/output_smoothing":
+    if address == "/streamdiffusion/live/output_smoothing":
         value = _ranged(_one_arg(message), "output_smoothing", 0.0, 1.0)
         return OSCCommand("live", "temporal_smoothing", value)
-    if address == "/ergonomics/live/latent_morph":
+    if address == "/streamdiffusion/live/latent_morph":
         value = _ranged(_one_arg(message), "latent_morph", 0.0, 1.0)
         return OSCCommand("live", "latent_morph_strength", value)
-    if address == "/ergonomics/live/history_frames":
+    if address == "/streamdiffusion/live/history_frames":
         value = _integer(_one_arg(message), "history_frames")
         if not 2 <= value <= 8:
             raise ValueError("history_framesは2〜8の範囲で送ってください。")
         return OSCCommand("live", "latent_history_frames", value)
-    if address == "/ergonomics/live/motion_threshold":
+    if address == "/streamdiffusion/live/motion_threshold":
         value = _ranged(_one_arg(message), "motion_threshold", 0.0, 1.0)
         return OSCCommand("live", "scene_cut_threshold", value)
 
-    if address == "/ergonomics/config/model_index":
+    if address == "/streamdiffusion/config/model_index":
         value = _integer(_one_arg(message), "model_index")
         if not 0 <= value < len(BUILTIN_MODEL_PROFILES):
             raise ValueError(f"model_indexは0〜{len(BUILTIN_MODEL_PROFILES) - 1}です。")
         return OSCCommand("config", "model_index", value)
-    if address == "/ergonomics/config/backend_index":
+    if address == "/streamdiffusion/config/backend_index":
         value = _integer(_one_arg(message), "backend_index")
         if not 0 <= value < len(BACKEND_INDEX):
             raise ValueError(f"backend_indexは0〜{len(BACKEND_INDEX) - 1}です。")
         return OSCCommand("config", "backend_index", value)
-    if address in {"/ergonomics/config/width", "/ergonomics/config/height"}:
+    if address in {"/streamdiffusion/config/width", "/streamdiffusion/config/height"}:
         name = address.rsplit("/", 1)[1]
         value = _integer(_one_arg(message), name)
         if value < 64 or value % 8:
             raise ValueError(f"{name}は64以上かつ8の倍数で送ってください。")
         return OSCCommand("config", name, value)
-    if address == "/ergonomics/config/performance_index":
+    if address == "/streamdiffusion/config/performance_index":
         value = _integer(_one_arg(message), "performance_index")
         if not 0 <= value < len(PERFORMANCE_PRESETS):
             raise ValueError(f"performance_indexは0〜{len(PERFORMANCE_PRESETS) - 1}です。")
         return OSCCommand("config", "performance_index", value)
     if address in {
-        "/ergonomics/config/spout_input",
-        "/ergonomics/config/spout_output",
+        "/streamdiffusion/config/spout_input",
+        "/streamdiffusion/config/spout_output",
     }:
         value = _one_arg(message)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{address.rsplit('/', 1)[1]}は空でない文字列を送ってください。")
         return OSCCommand("config", address.rsplit("/", 1)[1], value.strip())
-    if address == "/ergonomics/config/spout_sample_fps":
+    if address == "/streamdiffusion/config/spout_sample_fps":
         value = _ranged(_one_arg(message), "spout_sample_fps", 1.0, 240.0)
         return OSCCommand("config", "spout_sample_fps", value)
 
     operations = {
-        "/ergonomics/config/apply": "apply",
-        "/ergonomics/system/start": "start",
-        "/ergonomics/system/stop": "stop",
-        "/ergonomics/temporal/reset": "reset_temporal",
+        "/streamdiffusion/config/apply": "apply",
+        "/streamdiffusion/system/start": "start",
+        "/streamdiffusion/system/stop": "stop",
+        "/streamdiffusion/system/shutdown": "shutdown",
+        "/streamdiffusion/temporal/reset": "reset_temporal",
     }
     if address in operations:
         if not _triggered(message):
@@ -316,7 +472,7 @@ class OSCUDPServer:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._receive_loop,
-            name="ergonomics-osc-receiver",
+            name="streamdiffusion-osc-receiver",
             daemon=True,
         )
         self._thread.start()

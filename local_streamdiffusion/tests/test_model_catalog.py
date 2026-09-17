@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ergonomics_diffusion.model_catalog import (
+from streamdiffusion_bridge.model_catalog import (
     BUILTIN_MODEL_PROFILES,
     discover_model_profiles,
     find_profile,
