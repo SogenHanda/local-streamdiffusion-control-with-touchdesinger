@@ -218,8 +218,8 @@ TensorRT版をPython側から直接起動する場合:
 5. 生成映像を受けるSpout In TOPで`AI_Output`を選択します。
 6. Runを`1`にしてPythonと生成処理を起動します。
 
-同梱の`.toe`には、汎用化した`local_streamdiffusion_launcher`が埋め込み済みです。
-PC固有の絶対パスを設定する必要はありません。
+`local_streamdiffusion_launcher`が埋め込み済みです。
+これを用いて、stream diffusionを起動します。初回は、絶対パスを指定してください。
 
 Runは未起動時のPython起動に使用します。完全停止はOSC
 `/streamdiffusion/system/stop 1`で行います。Stop後の次のRunでは、Python、
