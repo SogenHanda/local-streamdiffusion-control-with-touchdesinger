@@ -7,6 +7,10 @@ WindowsとNVIDIA RTX GPU上で、TouchDesignerのカメラ映像をSpout経由�
 クラウドAPIは使用しません。初回セットアップとモデル取得後は、インターネットに
 接続していない環境でも実行できます。
 
+別PCのCodexへ開発を引き継ぐ場合は、先に
+[CODEX_HANDOFF.md](CODEX_HANDOFF.md)を読ませてください。Codex向けの作業ルールは
+[AGENTS.md](AGENTS.md)にあります。
+
 ## リポジトリ構成
 
 ```text
@@ -63,7 +67,9 @@ cd .\local-streamdiffusion-control-with-touchdesinger
 
 フォルダ構成は変更せず、`local_streamdiffusion`と
 `local_streamdiffusion_td`を同じ親フォルダに置いてください。TouchDesignerの
-ランチャーは、この兄弟関係からPython側の場所を自動検出します。
+`tools/local_streamdiffusion_launcher.py`は、この兄弟関係からPython側の場所を
+自動検出します。`.toe`内の埋め込みランチャーに別PCの絶対パスが残っている場合は、
+初回だけ`tools`版の内容へ差し替えるか、そのPCの`APP_DIR`へ変更してください。
 
 ### 2. 標準環境と基本モデルを導入する
 
