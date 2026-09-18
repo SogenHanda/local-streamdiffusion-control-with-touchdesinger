@@ -4,10 +4,32 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from streamdiffusion_bridge.ui import DiffusionApp
+from streamdiffusion_bridge.ui import BACKEND_LABELS, DiffusionApp
 
 
 class OSCStartStopLifecycleTests(unittest.TestCase):
+    def test_monitor_keeps_python_owned_graph_setting_when_collecting_config(self) -> None:
+        def variable(value):
+            return SimpleNamespace(get=lambda *args: value)
+        values = {
+            "resolution": "512 × 512", "model_path": "models/realistic-vision-v5.1",
+            "lcm_lora_path": "models/lcm-lora-sdv1-5", "spout_input": "TD_Camera",
+            "spout_output": "AI_Output", "denoise": 22, "seed": 1,
+            "target_fps": 120, "spout_sample_fps": 60,
+            "acceleration_backend": next(k for k,v in BACKEND_LABELS.items() if v == "tensorrt"),
+            "use_lcm_lora": True, "lcm_steps": "2", "tiny_vae": True,
+            "temporal_feedback": .03, "temporal_smoothing": 1,
+            "latent_morph_strength": 1, "latent_history_frames": 8,
+            "scene_cut_threshold": 1, "flip_input": False, "flip_output": False,
+            "offline": True,
+        }
+        app = SimpleNamespace(**{k+"_var": variable(v) for k,v in values.items()},
+                              _selected_model_profile=lambda: None,
+                              prompt_text=variable("a test prompt"))
+        for enabled in (False, True):
+            app._tensorrt_cuda_graph = enabled
+            self.assertEqual(DiffusionApp._collect_config(app).tensorrt_cuda_graph, enabled)
+
     def test_osc_stop_schedules_complete_application_close(self) -> None:
         app = SimpleNamespace(
             _generation_desired=True,

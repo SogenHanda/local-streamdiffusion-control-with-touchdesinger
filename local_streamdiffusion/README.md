@@ -155,7 +155,7 @@ Python UIは起動時に`127.0.0.1:13001/UDP`でOSC受信を開始します。To
 | `/streamdiffusion/config/spout_output` | string | Spout出力Sender Name |
 | `/streamdiffusion/config/spout_sample_fps` | float | 1〜240 |
 
-`model_index`は固定で、`0=DreamShaper 8`、`1=Absolute Reality 1.81`、`2=Realistic Vision 5.1`、`3=epiCRealism`、`4=LCM DreamShaper v7`、`5=SD-Turbo`です。モデルに応じたLCM-LoRAのON/OFF、Performanceに応じたstep数とTinyVAEはPython側で決定します。上下反転は入力・出力ともOFF、オフラインモードはON、TensorRT CUDA GraphはOFFに固定しています。
+`model_index`は固定で、`0=DreamShaper 8`、`1=Absolute Reality 1.81`、`2=Realistic Vision 5.1`、`3=epiCRealism`、`4=LCM DreamShaper v7`、`5=SD-Turbo`です。モデルに応じたLCM-LoRAのON/OFF、Performanceに応じたstep数とTinyVAEはPython側で決定します。上下反転は入力・出力ともOFF、オフラインモードはONです。CUDA GraphはPythonの`config.json`に保存した`tensorrt_cuda_graph`の値を維持します。
 
 設定値は連続して届くことを想定し、最後の受信から350ms後にまとめて反映・保存します。推論中なら自動的に安全に停止して新設定で再開し、停止中なら設定だけを保存します。そのためTouchDesigner側のApply操作では各設定を再送するだけでよく、`/streamdiffusion/config/apply`を送る必要はありません。互換用として同addressへ`1`を送れば待たずに即時確定できます。
 
@@ -300,7 +300,19 @@ RTX 4070 Ti 12GB、epiCRealism、512 × 512、2-step、TinyVAEで推論単体を
 | xFormers | 66.73 ms | 72.02 ms | 14.99 | 47.91 ms |
 | TensorRT FP16 | 48.27 ms | 49.50 ms | 20.72 | 27.69 ms |
 
-TensorRTは同条件で平均フレーム時間を約28%短縮し、推論FPSを約38%向上しました。固定入力で保存したxFormers/TensorRT出力はMAE 1.58/255、PSNR 39.7 dBで、目視でも同じ椅子構造を維持しています。StreamDiffusion 0.1.1のTensorRTラッパーは毎フレーム入出力バッファを再確保するため、CUDA Graphを使うと古いバッファアドレスを再生してノイズ化します。本実装では画質を優先してCUDA Graphを無効化しています。
+TensorRTは同条件で平均フレーム時間を約28%短縮し、推論FPSを約38%向上しました。固定入力で保存したxFormers/TensorRT出力はMAE 1.58/255、PSNR 39.7 dBで、目視でも同じ椅子構造を維持しています。これは従来実装の参考測定です。
+
+### 2026-09-18: 画質設定を維持した高速化
+
+WindowsのSpout受信待ちには高精度waitable timerを使用します。通常のPython 3.10 `Event.wait`では、29fps指定の34.5ms待機が約47msになり、実取得が約21fpsへ落ちる現象を確認しました。高精度タイマーは受信スレッド終了時に解放し、非対応環境では通常待機へ戻ります。
+
+TensorRTは専用の固定バッファ実装へ変更しました。shapeが同じ間はメモリとbindingを再利用し、カメラ入力・timestep・prompt embeddingは毎回コピーします。コピー・推論と呼出元のCUDA streamは明示的に同期します。GPU上で8bit画素へ変換してからCPUへ転送し、従来のFP16正規化・float32丸めを維持します。
+
+停止中に`config.json`の`tensorrt_cuda_graph`を`true`へ変更すると、固定バッファのUNetとTinyVAEをCUDA Graphで実行します。既定値は`false`です。従来のStreamDiffusionラッパーへ直接CUDA Graphを有効化しないでください。従来版は毎フレームの再確保でポインタが変わり、出力がノイズ化します。新実装はshape変更でgraphを破棄し、再確保後に再captureします。時間履歴・scheduler・noiseの更新はgraphの外に置きます。通常VAEではUNetだけをcaptureします。
+
+RTX 4090 / Realistic Vision 5.1 / 512×512 / Balancedで、前処理を含む固定入力の200フレーム比較は **28.63→33.37fps**。1-stepも **30.40→37.24fps** でした。入力反転、Strength/Seed、prompt、時間安定化の変更を含む両200フレームは、従来版との最大画素差0/255です。実カメラのFPSは入力上限、TD側の処理、GPU競合で変わります。30fpsを超える計測ではTD側の`spout_sample_fps`も60などへ上げてください。解像度・step・時間安定化を下げる必要はありません。
+
+`benchmark_pipeline.py`の`frame_mean_ms` / `frame_fps`は前処理などを含む1回の`process()`全体です。従来の`mean_ms` / `fps`は前処理を除くため、比較するときは同じ指標を使ってください。
 
 任意のPC・設定で再計測できます。結果はGit管理外の`benchmarks/`へJSON保存されます。
 

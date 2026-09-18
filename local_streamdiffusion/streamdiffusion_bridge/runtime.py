@@ -13,6 +13,7 @@ from PIL import Image
 from .config import AppConfig
 from .engine import StreamDiffusionEngine
 from .spout_transport import ReceivedFrame, SpoutInput, SpoutOutput
+from .timing import FrameWaiter
 
 
 @dataclass(slots=True)
@@ -123,17 +124,16 @@ class LatestFrameReceiver:
 
     def _run(self) -> None:
         try:
-            with SpoutInput(self._sender_name, self._flip_vertical) as spout_input:
+            with FrameWaiter() as waiter, SpoutInput(self._sender_name, self._flip_vertical) as spout_input:
                 next_receive_at = 0.0
                 while not self._should_stop():
                     now = time.perf_counter()
                     if now < next_receive_at:
-                        self._stop_event.wait(min(next_receive_at - now, 0.05))
+                        waiter.wait(next_receive_at - now, self._stop_event)
                         continue
                     next_receive_at = now + 1.0 / self._sample_fps
                     frame = spout_input.receive()
                     if frame is None:
-                        time.sleep(0.001)
                         continue
                     with self._condition:
                         self._latest_frame = frame

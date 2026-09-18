@@ -431,7 +431,6 @@ def apply_osc_config(base: AppConfig, updates: dict[str, Any]) -> AppConfig:
         lcm_lora_path="models/lcm-lora-sdv1-5",
         tiny_vae_path="models/taesd",
         tensorrt_engine_root="engines/tensorrt",
-        tensorrt_cuda_graph=False,
         flip_input=False,
         flip_output=False,
         offline_mode=True,

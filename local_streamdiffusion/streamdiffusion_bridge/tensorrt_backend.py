@@ -301,9 +301,9 @@ def activate_unet_engine(
 
     import gc
     import torch
-    from polygraphy import cuda
     from polygraphy.backend.trt import util as trt_util
-    from streamdiffusion.acceleration.tensorrt import UNet2DConditionModelEngine
+    from streamdiffusion.acceleration.tensorrt.utilities import Engine
+    from .tensorrt_unet import BufferedTensorRTUNet
 
     # StreamDiffusion 0.1.1 was written for Polygraphy 0.47. NVIDIA's public
     # PyPI now starts at 0.48, where this small helper was removed. TensorRT 9
@@ -313,17 +313,10 @@ def activate_unet_engine(
             engine.num_bindings // max(engine.num_optimization_profiles, 1)
         )
 
-    polygraphy_stream = cuda.Stream()
-    wrapper = UNet2DConditionModelEngine(
-        str(status.cache.engine_path),
-        polygraphy_stream,
-        # StreamDiffusion 0.1.1 reallocates TensorRT buffers on every call.
-        # Replaying a graph captured with the old addresses returns corrupted
-        # noise after the first frame, so quality takes priority here.
-        use_cuda_graph=False,
-    )
-    # The wrapper needs the Polygraphy stream to outlive every inference call.
-    wrapper._streamdiffusion_cuda_stream = polygraphy_stream
+    runtime_engine = Engine(str(status.cache.engine_path))
+    runtime_engine.load()
+    runtime_engine.activate()
+    wrapper = BufferedTensorRTUNet(runtime_engine, use_cuda_graph=config.tensorrt_cuda_graph)
 
     original_unet = stream.unet
     original_unet.to(torch.device("cpu"))
@@ -336,6 +329,6 @@ def activate_unet_engine(
     gc.collect()
     torch.cuda.empty_cache()
     if config.tensorrt_cuda_graph:
-        log("CUDA Graphは連続フレームのバッファ互換性を優先して無効化しました。")
-    log("TensorRT FP16 UNetを有効化しました。")
+        log("固定バッファのTensorRT CUDA Graphを有効にしました。")
+    log("TensorRT FP16 UNetを有効化しました（入出力バッファ再利用）。")
     return status.cache

@@ -221,7 +221,8 @@ class OSCControlTests(unittest.TestCase):
         self.assertFalse(config.flip_input)
         self.assertFalse(config.flip_output)
         self.assertTrue(config.offline_mode)
-        self.assertFalse(config.tensorrt_cuda_graph)
+        self.assertTrue(config.tensorrt_cuda_graph)
+        self.assertFalse(apply_osc_config(AppConfig(tensorrt_cuda_graph=False), {"model_index": 2}).tensorrt_cuda_graph)
 
 
 class OSCServerTests(unittest.TestCase):

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import statistics
+import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,7 @@ def main() -> int:
 
     engine = StreamDiffusionEngine(config, print)
     timings: list[float] = []
+    frame_timings: list[float] = []
     stages: dict[str, list[float]] = {}
     last_output: Image.Image | None = None
     try:
@@ -61,7 +63,9 @@ def main() -> int:
         for _ in range(args.warmup):
             engine.process(frame)
         for _ in range(args.frames):
+            frame_started = time.perf_counter()
             last_output, elapsed_ms = engine.process(frame)
+            frame_timings.append((time.perf_counter() - frame_started) * 1000.0)
             timings.append(elapsed_ms)
             for name, value in engine.last_stage_metrics.items():
                 stages.setdefault(name, []).append(value)
@@ -87,6 +91,10 @@ def main() -> int:
             "p50_ms": statistics.median(timings),
             "p95_ms": percentile(timings, 0.95),
             "fps": 1000.0 / statistics.fmean(timings),
+            "frame_mean_ms": statistics.fmean(frame_timings),
+            "frame_fps": 1000.0 / statistics.fmean(frame_timings),
+            "frame_p95_ms": percentile(frame_timings, 0.95),
+            "cuda_graph": config.tensorrt_cuda_graph,
             "stage_mean_ms": {
                 name: statistics.fmean(values) for name, values in stages.items()
             },

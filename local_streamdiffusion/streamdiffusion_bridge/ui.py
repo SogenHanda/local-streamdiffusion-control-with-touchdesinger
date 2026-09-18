@@ -202,6 +202,7 @@ class DiffusionApp(tk.Tk):
         style.configure("Horizontal.TScale", background=PANEL, troughcolor="#0e1218")
 
     def _create_variables(self, config: AppConfig) -> None:
+        self._tensorrt_cuda_graph = config.tensorrt_cuda_graph
         self.model_profiles = discover_model_profiles()
         active_profile = find_profile(
             self.model_profiles,
@@ -1100,7 +1101,7 @@ class DiffusionApp(tk.Tk):
             spout_sample_fps=float(self.spout_sample_fps_var.get()),
             acceleration_backend=BACKEND_LABELS[self.acceleration_backend_var.get()],
             tensorrt_engine_root="engines/tensorrt",
-            tensorrt_cuda_graph=False,
+            tensorrt_cuda_graph=self._tensorrt_cuda_graph,
             use_lcm_lora=bool(self.use_lcm_lora_var.get()),
             lcm_steps=int(self.lcm_steps_var.get().split()[0]),
             use_tiny_vae=bool(self.tiny_vae_var.get()),
@@ -1460,6 +1461,7 @@ class DiffusionApp(tk.Tk):
             self._launch_worker_from_osc(config)
 
     def _sync_ui_from_config(self, config: AppConfig) -> None:
+        self._tensorrt_cuda_graph = config.tensorrt_cuda_graph
         profile = find_profile(self.model_profiles, config.model_profile, config.model_path)
         if profile is not None:
             self.model_profile_var.set(profile.display_label)

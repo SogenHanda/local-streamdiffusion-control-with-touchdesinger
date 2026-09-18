@@ -88,8 +88,11 @@ Python monitor → OSC 127.0.0.1:9001 → TouchDesigner dashboard
 - Autoは一致するTensorRTエンジンがあれば使用し、なければxFormersへfallback。
 - TensorRT明示指定では一致するエンジンがなければ開始せず、誤条件を隠さない。
 - Engine keyはGPU、モデル、解像度、step、LCM-LoRA、runtimeに依存。
-- TensorRT CUDA GraphはOFF。現行StreamDiffusionラッパーのバッファ再確保と組み合わせると
-  古いアドレスを再生して出力がノイズ化するため。
+- CUDA Graphは既定OFF。`config.json`の`tensorrt_cuda_graph=true`で、新しい固定バッファ
+  UNetとTinyVAEのgraphを有効化できる。OSC設定と監視UIはこの値を維持する。
+  StreamDiffusion標準ラッパーは毎フレーム再確保でノイズ化するため使わない。
+  `tensorrt_unet.py`はshape/device/dtype変更で再確保・再captureし、入力を毎回更新する。
+  TinyVAE graphはstatelessなencode/decodeだけをcaptureし、時間履歴やnoiseを含めない。
 - TensorRT engineとONNX中間生成物はGit管理しない。
 
 ## 5. OSCプロトコル
@@ -178,6 +181,10 @@ Python、TD UI、README、testsを同時に更新してください。
 | `streamdiffusion_bridge/runtime.py` | Spout受信thread、推論worker、最新frame保持 |
 | `streamdiffusion_bridge/engine.py` | StreamDiffusion、live更新、時間安定化 |
 | `streamdiffusion_bridge/tensorrt_backend.py` | engine key、inspect/build/load |
+| `streamdiffusion_bridge/tensorrt_unet.py` | 固定バッファUNet、CUDA stream同期、任意のgraph |
+| `streamdiffusion_bridge/cuda_graph.py` | TinyVAE graphのcapture/replay/解放 |
+| `streamdiffusion_bridge/image_processing.py` | FP16正規化を維持したGPU上の8bit画像変換 |
+| `streamdiffusion_bridge/timing.py` | Windows高精度のフレーム待機 |
 | `streamdiffusion_bridge/spout_transport.py` | SpoutGL receive/send wrapper |
 | `streamdiffusion_bridge/ui.py` | 読取専用monitorとOSC lifecycle |
 | `download_models.py` | offline用model preset download |
@@ -264,6 +271,47 @@ TensorRT benchmark:
 
 変更後は少なくとも`git diff --check`、unit tests、`git status --short`を確認します。
 
+### RTX 4090 PCでの高速化検証（2026-09-18）
+
+- デスクトップRTX 4090 24GB / Driver 581.08 / Python 3.10.11 / TensorRT 9.0.1.post11.dev4。
+- Realistic Vision 5.1・512×512・TinyVAEの前処理を含む固定入力計測:
+  Balancedは28.63→33.37fps、1-stepは30.40→37.24fps。
+- 各200フレームで入力反転、Strength/Seed、prompt、history/smoothing/morph変更を比較。
+  従来TensorRT実装との最大画素差はどちらも0/255。
+- 29fps指定で約21fpsになるWindows待機問題を修正。実出力が入力上限に近づいたら、
+  TD側の`spout_sample_fps`を60へ上げて計測する。画質設定は維持する。
+- CPUスレッド数変更とcuDNN自動探索は、このPCで明確な効果がなく採用していない。
+- CUDA Graphの起動直後はcaptureがある。ウォームアップ後の値で比較する。
+- `frame_fps`は前処理込み。旧benchmarkの`fps`と直接混ぜて比較しない。
+- 他のGPU・モデル・解像度でのgraph品質比較と30分耐久は別途必要。
+
+#### 原因の切り分けと最終確認
+
+- 受信だけの比較で、通常待機は21.18fps、Windowsタイマー精度を一時的に上げると
+  28.83fps、元へ戻すと21.17fpsになった。製品実装はグローバルなタイマー設定変更を
+  避け、受信thread専用の高精度waitable timerを使用する。
+- 毎フレームのTensorRT buffer再確保とbinding設定を除去。固定アドレスを維持して
+  UNetをcaptureし、TinyVAEのencode/decodeも個別にcaptureする。
+  呼出元と専用CUDA streamの依存関係を明示し、入力を毎回更新する。
+- 画像変換はGPU上で8bit化してからCPUへ転送する。FP16での正規化とfloat32での
+  丸め順序を維持し、有限FP16値の全パターンで従来変換との一致をテストした。
+- 品質比較の基準はcommit `18853a0`のTensorRT実装。固定入力を12回warmup後、
+  200フレーム実行。30フレームごとに入力を左右反転し、40フレーム目にStrength/Seed、
+  80フレーム目にprompt、120/160フレーム目に時間安定化設定を変更した。
+  Balancedと1-stepそれぞれについて全フレームの画素を比較した。
+- 実映像では修正前の約21fpsから、入力取得上限60fps設定後は約30fpsを確認。
+  この間に利用者が入力映像や時間履歴設定を変更しているため、この実映像の値は
+  厳密な同条件比較ではない。同条件での改善率は上記固定入力比較を使う。
+- 最終のBalanced設定でも120フレーム再測定し、`frame_fps=33.05`を確認。
+  `fps=37.07`は前処理を除く別指標であり、実出力FPSではない。
+- unit testsは60件成功。CUDAのbuffer再利用・入力更新・shape変更時の再capture、
+  timer解放、OSCと監視UIによるgraph設定保持を含む。TensorRT verifyも成功。
+- OSC Stopでcontrollerが終了すること、通常launcherで起動すること、Run=0で
+  停止しないこと、二重起動防止、graph設定と入力取得上限60の保持を確認した。
+- このPCの`config.json`はgraph有効。Git管理される既定値はfalseなので、別PCでは
+  停止中に明示的に有効化して品質と安定性を検証する。engineの再buildは不要。
+- 生ログ、benchmark JSON、個人の映像、ローカル設定はGit管理しない。
+
 ## 11. 既知の注意点
 
 - Python 3.11ではなく3.10を使う。既存Pythonは削除せずside-by-sideでよい。
@@ -285,7 +333,7 @@ TensorRT benchmark:
 3. 本番GPU上でTensorRT環境を導入。
 4. 最初はBackend Auto/xFormersでTDからmodel・resolution・performanceを保存。
 5. アプリをStopして、その設定のTensorRT engineを本番PCでbuild。
-6. 52 testsとTensorRT verifyを実行。
+6. unit tests（この変更時点で60件）とTensorRT verifyを実行。
 7. Spout I/O、OSC 13001/9001、Run/Stop再起動を確認。
 8. RTX 4090 Laptopでモデル別FPSと画質を比較。
 9. 本番前に30分以上の耐久テストを行う。

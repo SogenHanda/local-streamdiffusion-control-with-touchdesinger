@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image, ImageChops, ImageStat
 
 from .config import AppConfig
+from .image_processing import decoded_tensor_to_pil
 from .tensorrt_backend import (
     activate_unet_engine,
     build_unet_engine,
@@ -34,6 +35,7 @@ class StreamDiffusionEngine:
         self._previous_raw_output: Image.Image | None = None
         self._latent_history: deque[Any] = deque()
         self._original_decode_image = None
+        self._vae_graph_calls: dict[str, Any] = {}
         self._cuda_stage_events: dict[str, tuple[Any, Any]] = {}
         self._cuda_stage_event_pool: dict[str, tuple[Any, Any]] = {}
         self._processed_frames = 0
@@ -161,6 +163,14 @@ class StreamDiffusionEngine:
         else:
             self.log(f"モデル内蔵の少ステップ推論を使用します: t_index={t_index_list}")
         self._configure_acceleration_backend()
+        if self.active_backend == "TensorRT FP16" and self.config.tensorrt_cuda_graph and self.config.use_tiny_vae:
+            from .cuda_graph import CapturedVAECall
+
+            for name in ("encode", "decode"):
+                captured = CapturedVAECall(getattr(self.stream.vae, name))
+                self._vae_graph_calls[name] = captured
+                setattr(self.stream.vae, name, captured)
+            self.log("TinyVAEの固定バッファCUDA Graphを有効にしました。")
         self._prepare_stream()
         self._install_stage_timers()
         self._warmed_up = False
@@ -465,7 +475,7 @@ class StreamDiffusionEngine:
         self.last_stage_metrics["diffusion_ms"] = (
             diffusion_completed - started
         ) * 1000.0
-        raw_output = self._postprocess_image(output_tensor, output_type="pil")[0].convert("RGB")
+        raw_output = decoded_tensor_to_pil(output_tensor)[0].convert("RGB")
         output = self._smooth_output(raw_output)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.last_stage_metrics["postprocess_ms"] = (
@@ -633,11 +643,23 @@ class StreamDiffusionEngine:
         )
 
     def close(self) -> None:
+        import gc
+
+        for name, captured in self._vae_graph_calls.items():
+            captured.close()
+            if self.stream is not None:
+                setattr(self.stream.vae, name, captured.callback)
+        self._vae_graph_calls.clear()
+        if self.stream is not None:
+            close_unet = getattr(getattr(self.stream, "unet", None), "close", None)
+            if callable(close_unet):
+                close_unet()
         self.reset_temporal(log=False)
         self._original_decode_image = None
         self._cuda_stage_events.clear()
         self._cuda_stage_event_pool.clear()
         self.stream = None
         self.pipe = None
+        gc.collect()
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()
