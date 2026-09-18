@@ -77,7 +77,11 @@ Python monitor → OSC 127.0.0.1:9001 → TouchDesigner dashboard
 - RGBの強いフィードバックだけに依存せず、生成latent履歴をモーフする。
 - `input_feedback`はカメラ入力履歴を使い、生成出力を再帰的に入力しない。
 - `output_smoothing`は小さな変化だけを平滑化し、大きな変化では残像を抑える。
-- `latent_morph`と2〜8フレームのlatent履歴でパラパラした生成変化を減らす。
+- `latent_morph`と短い時間幅のlatent履歴でパラパラした生成変化を減らす。
+- 現在の`history_frames`は30fps換算の時間幅（2=33ms、8=233ms）。
+  `latent_morph.py`でraw latentの有限時間窓を平均し、局所的な入力の変化で残像を抑える。
+  2-stepの入力ガイドは1フレーム遅らせる。時間幅内のraw履歴は最大64件で制限する。
+- RGBのOutput Smoothingは100%でも履歴を最大50%に制限し、現在フレームを残す。
 - 自動のscene-cutリセットは無効。`motion_threshold`は徐々に追従量を変える。
 - Strength / Seed変更時は内部latentを非表示で再充填し、茶色や灰色の単色フレームを
   抑止する。
@@ -185,6 +189,7 @@ Python、TD UI、README、testsを同時に更新してください。
 | `streamdiffusion_bridge/cuda_graph.py` | TinyVAE graphのcapture/replay/解放 |
 | `streamdiffusion_bridge/image_processing.py` | FP16正規化を維持したGPU上の8bit画像変換 |
 | `streamdiffusion_bridge/timing.py` | Windows高精度のフレーム待機 |
+| `streamdiffusion_bridge/latent_morph.py` | 時間幅での生成特徴モーフ、局所入力変化による履歴抑制 |
 | `streamdiffusion_bridge/spout_transport.py` | SpoutGL receive/send wrapper |
 | `streamdiffusion_bridge/ui.py` | 読取専用monitorとOSC lifecycle |
 | `download_models.py` | offline用model preset download |
@@ -313,6 +318,20 @@ TensorRT benchmark:
 - 生ログ、benchmark JSON、個人の映像、ローカル設定はGit管理しない。
 
 ## 11. 既知の注意点
+
+### モーフ更新の検証
+
+- Realistic Vision / TensorRT CUDA Graph / 512×512 / Balancedで実Spout入力を120枚取得し、
+  同じ入力とprompt変更を用いて各180フレーム比較。処理全体は32.87→33.91ms
+  （30.43→29.49fps）。滑らかさを増やす処理の追加コストはこの測定で約1ms。
+- 入力を再生した区間の平均フレーム間画素変化は0.830→0.621/255。
+  この値だけで画質や残像の優劣は判定できない。短いクリップでの確認であり、
+  高速動作・遮蔽・他モデル・長時間の主観品質は未検証。
+- 69 testsとTensorRT verifyが成功。段階的・単調な遷移、時間幅後の収束、
+  静止画細部の保持、局所的な動きでの残像抑制、2-stepの入力位置合わせを含む。
+  最終テスト初回に既存GPU画像変換テストでPythonが1度異常終了（0xC0000409）。
+  単独テストと全68件の再実行では再現せず、原因は未特定。実推論比較は完走。
+- TensorRTエンジンの再buildは不要。現行のモデル・解像度・ステップ数を維持する。
 
 - Python 3.11ではなく3.10を使う。既存Pythonは削除せずside-by-sideでよい。
 - PyTorch 2.1.0ではNumPy 2.xを使わない。`numpy==1.26.4`に固定済み。

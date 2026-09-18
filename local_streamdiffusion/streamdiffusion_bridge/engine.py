@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -10,6 +9,7 @@ from PIL import Image, ImageChops, ImageStat
 
 from .config import AppConfig
 from .image_processing import decoded_tensor_to_pil
+from .latent_morph import LatentMorph, camera_guide
 from .tensorrt_backend import (
     activate_unet_engine,
     build_unet_engine,
@@ -33,7 +33,10 @@ class StreamDiffusionEngine:
         self._warmed_up = False
         self._previous_input: Image.Image | None = None
         self._previous_raw_output: Image.Image | None = None
-        self._latent_history: deque[Any] = deque()
+        self._latent_morph = LatentMorph()
+        self._latent_history = self._latent_morph.history
+        self._morph_camera_input: Image.Image | None = None
+        self._previous_temporal_input: Image.Image | None = None
         self._original_decode_image = None
         self._vae_graph_calls: dict[str, Any] = {}
         self._cuda_stage_events: dict[str, tuple[Any, Any]] = {}
@@ -148,7 +151,7 @@ class StreamDiffusionEngine:
         self.log(
             "生成latentモーフを有効化しました: "
             f"{self.config.latent_morph_strength * 100:.0f}% / "
-            f"{self.config.latent_history_frames}フレーム"
+            f"時間幅 {(self.config.latent_history_frames - 1) / 30 * 1000:.0f}ms"
         )
         if self.config.use_lcm_lora:
             lcm_lora_path = self.config.resolved_lcm_lora_path
@@ -293,7 +296,7 @@ class StreamDiffusionEngine:
         self._report_prompt_length(prompt)
         self.stream.update_prompt(prompt)
         self.config.prompt = prompt
-        # Keep the bounded/clamped history so a prompt change morphs instead of
+        # Keep the short raw-feature history so a prompt change morphs instead of
         # cutting. StreamDiffusion's own delayed latent also remains valid.
         self.log("プロンプトを更新しました（時間履歴を保ったまま遷移します）。")
 
@@ -402,7 +405,9 @@ class StreamDiffusionEngine:
     def reset_temporal(self, log: bool = True) -> None:
         self._previous_input = None
         self._previous_raw_output = None
-        self._latent_history.clear()
+        self._latent_morph.reset()
+        self._morph_camera_input = None
+        self._previous_temporal_input = None
         self.last_motion_score = 0.0
         self.last_temporal_feedback = 0.0
         self.last_latent_morph = 0.0
@@ -432,7 +437,7 @@ class StreamDiffusionEngine:
         try:
             with self._torch.inference_mode():
                 image_tensor = stream.image_processor.preprocess(
-                    self._previous_input,
+                    self._previous_temporal_input or self._previous_input,
                     stream.height,
                     stream.width,
                 ).to(device=stream.device, dtype=stream.dtype)
@@ -459,8 +464,14 @@ class StreamDiffusionEngine:
             self._warmed_up = True
             self.log("ウォームアップ完了。")
             self._cuda_stage_events.clear()
+            self._latent_morph.reset()
 
         temporal_input = self._apply_temporal_feedback(fitted)
+        # Two-step StreamDiffusion returns the preceding input's denoised latent.
+        # Align motion guidance to that image instead of the next camera frame.
+        self._morph_camera_input = (
+            self._previous_temporal_input if self.config.lcm_steps == 2 else temporal_input
+        )
         self._processed_frames += 1
         # CUDA Events are accurate but their per-frame allocation has measurable
         # overhead in a realtime loop. Sample stages periodically and keep the
@@ -484,6 +495,7 @@ class StreamDiffusionEngine:
         if self._measure_cuda_stages:
             self._collect_cuda_stage_metrics()
         self._previous_input = fitted.copy()
+        self._previous_temporal_input = temporal_input.copy()
         self._previous_raw_output = raw_output.copy()
         return output, elapsed_ms
 
@@ -501,62 +513,20 @@ class StreamDiffusionEngine:
         return self._original_decode_image(stabilized)
 
     def _stabilize_generated_latent(self, current: Any) -> Any:
-        """Stabilize small latent flicker while rejecting stale structures."""
-        self.last_latent_morph = 0.0
-
-        strength = self.config.latent_morph_strength
-        frames = self.config.latent_history_frames
-        history = list(self._latent_history)[-frames:]
-
-        stabilized = current
-        if strength > 0.0 and history:
-            # Exponential recency weighting makes an 8-frame history useful for
-            # noise estimation without equally overlaying eight old structures.
-            # History always stores raw generated latents, never filtered output.
-            weighted = history[-1].float()
-            total_weight = 1.0
-            decay = 0.55
-            weight = decay
-            for latent in reversed(history[:-1]):
-                weighted = weighted + latent.float() * weight
-                total_weight += weight
-                weight *= decay
-            reference = weighted / total_weight
-
-            threshold = max(self.config.scene_cut_threshold, 1e-6)
-            motion_ratio = min(self.last_motion_score / threshold, 1.0)
-            # Smoothly reduce history influence as the camera moves. There is no
-            # hard scene-cut reset; the installation input changes continuously.
-            motion_gate = 1.0 - motion_ratio * motion_ratio * (3.0 - 2.0 * motion_ratio)
-            effective = strength * motion_gate
-            if effective > 0.0:
-                current_float = current.float()
-                delta = reference - current_float
-                # A history-clamped correction behaves like temporal antialiasing:
-                # small stochastic changes are smoothed, but a moved edge or new
-                # shape cannot drag an unrestricted old latent into this frame.
-                spatial_dims = tuple(range(2, len(current.shape)))
-                if spatial_dims:
-                    scale = current_float.var(
-                        dim=spatial_dims,
-                        keepdim=True,
-                        unbiased=False,
-                    ).add(1e-6).sqrt()
-                else:
-                    scale = current_float.abs().mean().reshape(
-                        (1,) * len(current.shape)
-                    )
-                correction_limit = scale * 0.35 + 0.04
-                correction = correction_limit * (delta / correction_limit).tanh()
-                stabilized = (current_float + correction * effective).to(
-                    dtype=current.dtype
-                )
-                self.last_latent_morph = effective
-
-        self._latent_history.append(current.detach().clone())
-        while len(self._latent_history) > frames:
-            self._latent_history.popleft()
-        return stabilized
+        """Morph generated features over a short duration before VAE decoding."""
+        threshold = max(self.config.scene_cut_threshold, 1e-6)
+        ratio = min(self.last_motion_score / threshold, 1.0)
+        gate = 1.0 - ratio * ratio * (3.0 - 2.0 * ratio)
+        strength = self.config.latent_morph_strength * gate
+        self.last_latent_morph = strength if self._latent_history else 0.0
+        guide = None
+        if self._morph_camera_input is not None and self.config.latent_morph_strength > 0.0:
+            guide = camera_guide(self._morph_camera_input, current)
+        return self._latent_morph.apply(
+            current, now=time.perf_counter(), strength=strength,
+            frames=self.config.latent_history_frames,
+            motion_threshold=self.config.scene_cut_threshold, guide=guide,
+        )
 
     def _apply_temporal_feedback(self, current: Image.Image) -> Image.Image:
         self.last_temporal_feedback = 0.0
@@ -592,7 +562,7 @@ class StreamDiffusionEngine:
         return self._detail_preserving_blend(
             current,
             self._previous_raw_output,
-            self.config.temporal_smoothing,
+            self.config.temporal_smoothing * 0.5,
             difference_cutoff=96,
         )
 

@@ -107,7 +107,7 @@ class TemporalFeedbackTests(unittest.TestCase):
         self.assertLess(third.item(), 0.05)
         self.assertAlmostEqual(engine.last_latent_morph, 0.5)
 
-    def test_latent_history_clamps_a_large_structural_change(self) -> None:
+    def test_latent_history_morphs_a_structural_change_when_camera_is_still(self) -> None:
         engine = self.make_engine(
             latent_morph_strength=0.8,
             latent_history_frames=8,
@@ -117,8 +117,9 @@ class TemporalFeedbackTests(unittest.TestCase):
 
         result = engine._stabilize_generated_latent(torch.ones((1, 1, 1, 1)))
 
-        # An unrestricted 80% blend would return 0.2 and leave a strong trail.
-        self.assertGreater(result.item(), 0.9)
+        # A changed generation now transitions even when its latent delta is large.
+        self.assertGreater(result.item(), 0.5)
+        self.assertLess(result.item(), 0.9)
 
     def test_latent_morph_is_motion_adaptive_and_history_is_bounded(self) -> None:
         engine = self.make_engine(
@@ -132,8 +133,8 @@ class TemporalFeedbackTests(unittest.TestCase):
         engine._stabilize_generated_latent(torch.full((1, 1, 1, 1), 2.0))
 
         self.assertAlmostEqual(engine.last_latent_morph, 0.3)
-        self.assertGreater(result.item(), 0.9)
-        self.assertEqual(len(engine._latent_history), 2)
+        self.assertGreater(result.item(), 0.8)
+        self.assertLessEqual(len(engine._latent_history), 64)
 
     def test_large_motion_does_not_discard_generated_latent_history(self) -> None:
         engine = self.make_engine(

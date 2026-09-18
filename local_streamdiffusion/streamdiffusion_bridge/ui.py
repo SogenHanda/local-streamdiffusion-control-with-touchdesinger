@@ -1740,7 +1740,9 @@ class DiffusionApp(tk.Tk):
         self.temporal_feedback_label_var.set(f"入力フレーム保持  {feedback}%")
         self.temporal_smoothing_label_var.set(f"出力平滑化  {smoothing}%")
         self.latent_morph_label_var.set(f"生成特徴モーフ  {latent_morph}%")
-        self.latent_history_label_var.set(f"特徴履歴  {latent_frames} フレーム")
+        self.latent_history_label_var.set(
+            f"モーフ時間幅  {(latent_frames - 1) / 30 * 1000:.0f}ms（履歴 {latent_frames}）"
+        )
         self.scene_cut_label_var.set(f"動き追従しきい値（自動リセットなし）  {scene_cut}%")
 
     def _append_log(self, message: str) -> None:

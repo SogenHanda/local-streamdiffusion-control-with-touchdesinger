@@ -95,6 +95,7 @@ def main() -> int:
             "frame_fps": 1000.0 / statistics.fmean(frame_timings),
             "frame_p95_ms": percentile(frame_timings, 0.95),
             "cuda_graph": config.tensorrt_cuda_graph,
+            "temporal_filter": "finite_window_camera_guided_v1",
             "stage_mean_ms": {
                 name: statistics.fmean(values) for name, values in stages.items()
             },
